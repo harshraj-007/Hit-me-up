@@ -1,5 +1,6 @@
 import type { Metadata, Viewport } from "next";
 import "./globals.css";
+import { Providers } from "./providers";
 
 export const metadata: Metadata = {
   title: { default: "Hit me up", template: "%s · Hit me up" },
@@ -16,7 +17,9 @@ export const viewport: Viewport = {
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
     <html lang="en">
-      <body className="min-h-dvh">{children}</body>
+      <body className="min-h-dvh">
+        <Providers>{children}</Providers>
+      </body>
     </html>
   );
 }

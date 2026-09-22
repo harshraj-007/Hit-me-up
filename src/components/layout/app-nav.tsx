@@ -17,9 +17,11 @@ export function AppNav() {
             href={href}
             aria-current={active ? "page" : undefined}
             className={clsx(
-              "flex flex-1 items-center justify-center gap-2 rounded-md px-3 py-2 text-sm md:flex-none md:justify-start",
-              "transition-colors hover:bg-border",
-              active ? "bg-border font-medium" : "text-muted",
+              "flex flex-1 flex-col items-center gap-0.5 rounded-md px-3 py-1.5 text-xs transition-colors",
+              "md:flex-none md:flex-row md:justify-start md:gap-2 md:py-2 md:text-sm",
+              active
+                ? "bg-accent-soft font-medium text-accent"
+                : "text-muted hover:bg-surface-hover hover:text-foreground",
             )}
           >
             <Icon aria-hidden className="size-4" />
