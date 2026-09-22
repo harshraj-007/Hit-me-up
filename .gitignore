@@ -1,0 +1,26 @@
+node_modules/
+.next/
+out/
+build/
+coverage/
+next-env.d.ts
+*.tsbuildinfo
+.DS_Store
+
+# env
+.env
+.env.*
+!.env.example
+
+# tests
+test-results/
+playwright-report/
+blob-report/
+playwright/.cache/
+
+# vercel / supabase local
+.vercel
+supabase/.temp/
+supabase/.branches/
+
+npm-debug.log*

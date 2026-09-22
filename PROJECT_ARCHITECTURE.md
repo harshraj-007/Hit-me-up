@@ -1,11 +1,10 @@
 # Project Architecture — Personal AI Daily Dashboard
 
-Status: **Phase 0 (agreed baseline, pending approval of open decisions at the bottom).**
-Nothing is scaffolded yet; this document is the contract for phases 1+.
+Status: **Phase 1 complete.** Foundation is scaffolded; this document is the contract for later phases.
 
 ## 1. Product in one line
 
-A personal command center that turns a morning brain-dump into a realistic time-blocked plan, replans as the day changes, and closes with a concise report. The UI answers one question: *"What matters right now, and what should I do next?"*
+A personal command center that turns a morning brain-dump into a realistic time-blocked plan, replans as the day changes, and closes with a concise report. The UI answers one question: _"What matters right now, and what should I do next?"_
 
 Non-goals: Notion clone, kanban, chat app, chart-heavy analytics, generic SaaS admin.
 
@@ -21,15 +20,15 @@ Non-goals: Notion clone, kanban, chat app, chart-heavy analytics, generic SaaS a
 
 ## 3. Current state (discovered)
 
-| Item | Finding |
-|---|---|
-| Project type | **Empty project** (git repo + README only) |
-| Commits | 1 (`first commit`) |
-| package.json / lockfile | none |
-| Source, config (TS, Tailwind, Next, ESLint) | none |
-| Env files, DB config, deployment config | none |
-| Tests | none |
-| Toolchain | Node v26.0.0, npm 12.0.2, git 2.54; pnpm not installed |
+| Item                                        | Finding                                                |
+| ------------------------------------------- | ------------------------------------------------------ |
+| Project type                                | **Empty project** (git repo + README only)             |
+| Commits                                     | 1 (`first commit`)                                     |
+| package.json / lockfile                     | none                                                   |
+| Source, config (TS, Tailwind, Next, ESLint) | none                                                   |
+| Env files, DB config, deployment config     | none                                                   |
+| Tests                                       | none                                                   |
+| Toolchain                                   | Node v26.0.0, npm 12.0.2, git 2.54; pnpm not installed |
 
 No existing architecture, so no conflicts and nothing to migrate.
 
@@ -63,7 +62,8 @@ src/
     time/                     # date-fns helpers, timezone handling
     motion/                   # GSAP/Anime setup, reduced-motion gate, tokens
   config/
-    env.ts                    # Zod-validated env; server vs public split
+    env.public.ts / env.server.ts   # Zod-validated env; public vs server-only split
+    navigation.ts
 supabase/
   migrations/                 # SQL, source-controlled
   seed.sql
@@ -77,23 +77,23 @@ Rules: `domain/` imports nothing from `server/`, `app/` or React. `server/` file
 
 Versions verified against the npm registry on 2026-09-22 (to be re-checked at install time).
 
-| Purpose | Package | Latest | Note |
-|---|---|---|---|
-| Framework | `next`, `react`, `react-dom` | 16.3.x / 19.3.x | App Router |
-| Language | `typescript` | 7.0.2 | **See decision D1** |
-| Styling | `tailwindcss` (+ `@tailwindcss/postcss`) | 4.3.x | CSS-first config (no `tailwind.config.js`) |
-| Validation | `zod` | 4.x | |
-| Dates | `date-fns` (+ `@date-fns/tz`) | 4.x | Timezone-aware days |
-| Icons | `lucide-react` | 1.x | |
-| DB/Auth | `@supabase/supabase-js`, `@supabase/ssr` | 2.x / 0.12 | |
-| AI | `@anthropic-ai/sdk` | 0.127 | Server-only |
-| Email (later) | `resend` | 6.x | Phase-gated |
-| WhatsApp (later) | `twilio` | 6.x | Phase-gated |
-| Motion | `gsap`, `animejs` | 3.15 / 4.x | Anime.js v4 API differs from v3 (named imports) |
-| Unit tests | `vitest` | 5.x | |
-| E2E | `@playwright/test` | 1.63 | |
-| Lint/format | `eslint` (+ `eslint-config-next`), `prettier` | 10.x | Check Next plugin compat with ESLint 10 |
-| Misc | `server-only`, `clsx` | | |
+| Purpose          | Package                                       | Latest          | Note                                            |
+| ---------------- | --------------------------------------------- | --------------- | ----------------------------------------------- |
+| Framework        | `next`, `react`, `react-dom`                  | 16.3.x / 19.3.x | App Router                                      |
+| Language         | `typescript`                                  | 7.0.2           | **See decision D1**                             |
+| Styling          | `tailwindcss` (+ `@tailwindcss/postcss`)      | 4.3.x           | CSS-first config (no `tailwind.config.js`)      |
+| Validation       | `zod`                                         | 4.x             |                                                 |
+| Dates            | `date-fns` (+ `@date-fns/tz`)                 | 4.x             | Timezone-aware days                             |
+| Icons            | `lucide-react`                                | 1.x             |                                                 |
+| DB/Auth          | `@supabase/supabase-js`, `@supabase/ssr`      | 2.x / 0.12      |                                                 |
+| AI               | `@anthropic-ai/sdk`                           | 0.127           | Server-only                                     |
+| Email (later)    | `resend`                                      | 6.x             | Phase-gated                                     |
+| WhatsApp (later) | `twilio`                                      | 6.x             | Phase-gated                                     |
+| Motion           | `gsap`, `animejs`                             | 3.15 / 4.x      | Anime.js v4 API differs from v3 (named imports) |
+| Unit tests       | `vitest`                                      | 5.x             |                                                 |
+| E2E              | `@playwright/test`                            | 1.63            |                                                 |
+| Lint/format      | `eslint` (+ `eslint-config-next`), `prettier` | 10.x            | Check Next plugin compat with ESLint 10         |
+| Misc             | `server-only`, `clsx`                         |                 |                                                 |
 
 Install only what a phase needs; notification, motion and AI packages arrive in their own phases.
 
@@ -145,16 +145,16 @@ Single ownership rule: **each animation has exactly one owner library.**
 - `src/config/env.ts` parses `process.env` with Zod at startup, with **separate server and public schemas**; failing fast with a clear message. Server env module imports `server-only`.
 - Only `NEXT_PUBLIC_*` values reach the browser, and only non-secrets (Supabase URL, anon/publishable key, app URL).
 
-| Variable | Scope | Phase |
-|---|---|---|
-| `NEXT_PUBLIC_SUPABASE_URL` | public | 1–2 |
-| `NEXT_PUBLIC_SUPABASE_ANON_KEY` (or publishable key) | public | 1–2 |
-| `NEXT_PUBLIC_APP_URL` | public | 1 |
-| `SUPABASE_SERVICE_ROLE_KEY` | server only, jobs/admin | when needed |
-| `ANTHROPIC_API_KEY`, `ANTHROPIC_MODEL` | server only | AI phase |
-| `RESEND_API_KEY`, `EMAIL_FROM` | server only | reminders |
-| `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `TWILIO_WHATSAPP_FROM` | server only | reminders |
-| `CRON_SECRET` | server only | scheduling |
+| Variable                                                          | Scope                   | Phase       |
+| ----------------------------------------------------------------- | ----------------------- | ----------- |
+| `NEXT_PUBLIC_SUPABASE_URL`                                        | public                  | 1–2         |
+| `NEXT_PUBLIC_SUPABASE_ANON_KEY` (or publishable key)              | public                  | 1–2         |
+| `NEXT_PUBLIC_APP_URL`                                             | public                  | 1           |
+| `SUPABASE_SERVICE_ROLE_KEY`                                       | server only, jobs/admin | when needed |
+| `ANTHROPIC_API_KEY`, `ANTHROPIC_MODEL`                            | server only             | AI phase    |
+| `RESEND_API_KEY`, `EMAIL_FROM`                                    | server only             | reminders   |
+| `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `TWILIO_WHATSAPP_FROM` | server only             | reminders   |
+| `CRON_SECRET`                                                     | server only             | scheduling  |
 
 ## 12. Missing production requirements (all, since project is empty)
 
@@ -171,28 +171,41 @@ Scaffold and toolchain; CI; env validation; migrations and RLS; auth and route p
 
 ## 14. Phase roadmap (proposed)
 
-| Phase | Scope |
-|---|---|
-| 0 | Reconnaissance, architecture, README (this) |
-| 1 | Scaffold: Next.js, TS, Tailwind, ESLint/Prettier, Vitest, Playwright config, env contract, CI, design tokens, app shell |
-| 2 | Supabase: migrations, RLS, generated types, repositories, auth (sign-in, session, route protection) |
-| 3 | Domain core: task model, scheduling engine, validation, unit tests (no AI) |
-| 4 | Briefing capture + AI plan generation pipeline (prompts, Zod, business-rule validation, retry, logging) |
-| 5 | Today dashboard: "what now / next", timeline, task actions (complete/skip/late/add/reprioritize) |
-| 6 | Replanning with plan revisions and history preservation |
-| 7 | Motion system (GSAP + Anime.js) applied to dashboard |
-| 8 | End-of-day reports + history views |
-| 9 | Reminders: Resend email, Twilio WhatsApp, cron processing |
-| 10 | Hardening: e2e suite, a11y audit, rate limiting, security headers, deploy runbook |
+| Phase | Scope                                                                                                                   |
+| ----- | ----------------------------------------------------------------------------------------------------------------------- |
+| 0     | Reconnaissance, architecture, README (this)                                                                             |
+| 1     | Scaffold: Next.js, TS, Tailwind, ESLint/Prettier, Vitest, Playwright config, env contract, CI, design tokens, app shell |
+| 2     | Supabase: migrations, RLS, generated types, repositories, auth (sign-in, session, route protection)                     |
+| 3     | Domain core: task model, scheduling engine, validation, unit tests (no AI)                                              |
+| 4     | Briefing capture + AI plan generation pipeline (prompts, Zod, business-rule validation, retry, logging)                 |
+| 5     | Today dashboard: "what now / next", timeline, task actions (complete/skip/late/add/reprioritize)                        |
+| 6     | Replanning with plan revisions and history preservation                                                                 |
+| 7     | Motion system (GSAP + Anime.js) applied to dashboard                                                                    |
+| 8     | End-of-day reports + history views                                                                                      |
+| 9     | Reminders: Resend email, Twilio WhatsApp, cron processing                                                               |
+| 10    | Hardening: e2e suite, a11y audit, rate limiting, security headers, deploy runbook                                       |
 
 Future (explicitly not planned yet): weekly/monthly analysis, growth tracking, smart nudges, calendar integration, voice briefing, focus mode, habit tracking.
 
-## 15. Open decisions (need approval)
+## 15. Phase 1 outcomes and provisional decisions
 
-- **D1 TypeScript version:** pin to TS 5.x/6.x until tooling is verified on 7, or adopt 7.0.
-- **D2 Node version:** pin to a Vercel-supported LTS (recommend 24 LTS) via `.nvmrc` + `engines`, rather than local Node 26.
+Applied in Phase 1 (the owner had not yet answered the Phase 0 questions, so the recommendation in each case was used; revisit any of them):
+
+- **D1** TypeScript pinned to **6.0.x** (7.0 is `latest`; tooling not yet verified against it).
+- **D2** Node **24** in `.nvmrc`, `engines >=22`. Local Node 26 also works.
+- **D4** **npm** (matches the requested `npm run …` scripts).
+- ESLint is 9.x: `eslint-config-next` 16 peers `>=9`, and npm resolved 9.39.
+- Tailwind 4 CSS-first (`src/app/globals.css`); system font stack to keep builds offline-safe.
+- **Health:** `GET /api/health` returns `{status, timestamp, checks:{database}}` only. The probe calls Supabase's unauthenticated `/auth/v1/health` with the anon key, so it works before any schema exists. It proves reachability of the Supabase project, not table access. 200 = ok/degraded (unconfigured), 503 = down.
+- **Auth boundary:** `(app)` layout calls `requireUser()` (verified `getUser()`), redirecting to `/login`. `/login` is a placeholder until Phase 2. There is no dev bypass. The session-refresh proxy is also Phase 2.
+- **Errors:** `AppError` hierarchy in `src/server/errors` (validation 400, auth 401, not found 404, external 502, internal 500); `withErrorHandling` wraps route handlers; causes are logged, never returned.
+- **Logging:** JSON lines via `src/server/logging`; sensitive keys and secret-shaped strings redacted; `console` is lint-banned elsewhere.
+- **Motion:** `src/lib/motion` (tokens, single reduced-motion gate, lazy GSAP/Anime loaders). `@gsap/react` is deferred until the motion phase.
+- CI: `.github/workflows/ci.yml` (lint, typecheck, unit, e2e). No build step is separate because e2e builds.
+
+## 16. Open decisions (still need approval)
+
 - **D3 Auth method and access control:** magic link vs Google OAuth vs both; single-user allow-list vs open sign-up.
-- **D4 Package manager:** npm (installed) vs pnpm (recommended, needs install).
 - **D5 Scheduling:** Vercel Cron on current plan vs external trigger (e.g. Supabase pg_cron/Edge) for minute-level reminders.
 - **D6 Rate limiting:** Postgres-backed counters (no new service) vs Upstash Redis.
 - **D7 Claude model:** default model for planning and whether a cheaper model handles reports.

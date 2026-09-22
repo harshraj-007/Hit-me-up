@@ -4,11 +4,11 @@ A personal command center for a student's day. Each morning you write a short br
 
 The UI exists to answer one question: **what matters right now, and what should I do next?**
 
-> Status: **Phase 0 complete** — architecture agreed, no application code yet.
+> Status: **Phase 1 complete** — production foundation (tooling, env, health, errors, logging, DB connection, app shell). No product features yet.
 
 ## Prerequisites
 
-- Node.js LTS (target: 24; see `PROJECT_ARCHITECTURE.md` D2) and a package manager (npm, or pnpm pending D4)
+- Node.js 24 LTS (`.nvmrc`; Node ≥ 22 is supported) and npm
 - Git
 - A Supabase project (or the Supabase CLI + Docker for a local stack)
 - An Anthropic API key (AI phase onward)
@@ -28,25 +28,27 @@ Full detail, directory layout, schema outline and open decisions: [PROJECT_ARCHI
 
 ## Environment setup
 
-Local secrets live in `.env.local` (gitignored). A committed `.env.example` (created in Phase 1) lists every variable name without values. Environment variables are validated with Zod at startup; only `NEXT_PUBLIC_*` non-secrets reach the browser. The variable contract is in section 11 of the architecture doc.
+Local secrets live in `.env.local` (gitignored). Copy `.env.example` to `.env.local`. It lists every variable name without values. Environment variables are validated with Zod at startup; only `NEXT_PUBLIC_*` non-secrets reach the browser. The variable contract is in section 11 of the architecture doc.
 
 ## Development commands
 
-Not available yet — the project is scaffolded in Phase 1. Planned scripts:
+| Command             | Purpose                                                            |
+| ------------------- | ------------------------------------------------------------------ |
+| `npm run dev`       | Start the Next.js dev server                                       |
+| `npm run build`     | Production build                                                   |
+| `npm start`         | Serve the production build                                         |
+| `npm run lint`      | ESLint                                                             |
+| `npm run typecheck` | TypeScript, no emit                                                |
+| `npm test`          | Vitest unit tests                                                  |
+| `npm run test:e2e`  | Playwright smoke tests (builds and serves the app; uses dummy env) |
+| `npm run format`    | Prettier                                                           |
 
-| Command | Purpose |
-|---|---|
-| `dev` | Start the Next.js dev server |
-| `build` / `start` | Production build / serve |
-| `lint` | ESLint |
-| `typecheck` | TypeScript, no emit |
-| `test` | Vitest unit tests |
-| `test:e2e` | Playwright |
+First run of e2e needs `npx playwright install chromium`.
 
 ## Phase roadmap
 
 0. Reconnaissance and architecture ✅
-1. Scaffold, tooling, env contract, CI, app shell
+1. Scaffold, tooling, env contract, CI, app shell ✅
 2. Supabase schema, RLS, repositories, authentication
 3. Domain core: task model and scheduling engine (no AI)
 4. Briefing capture and AI plan generation pipeline
