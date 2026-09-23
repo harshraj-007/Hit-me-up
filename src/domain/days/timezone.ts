@@ -1,10 +1,14 @@
 /**
- * Timezone strategy (Phase 3): every user has a `profiles.timezone` IANA name, defaulting
- * to "UTC" until the client reports the browser's actual zone once per session (see
- * src/features/settings/timezone-sync.tsx). "Today" is never computed with
- * `new Date().toISOString().slice(0, 10)` — that's always UTC's calendar date, which is
- * wrong for most users most of the day. Deliberately out of scope: a settings UI to change
- * timezone by hand — the one-time browser sync is the whole Phase 3 mechanism.
+ * Timezone strategy: a user's `profiles.timezone` (IANA name) is reported by their browser —
+ * `Intl.DateTimeFormat().resolvedOptions().timeZone` — and a profile row exists ONLY once
+ * that has happened. Until then the server knows the user's timezone is unknown and creates
+ * no day (see src/server/services/day.ts `findCurrentDay`); it never guesses one. "Today" is
+ * then the calendar date in that zone, never `new Date().toISOString().slice(0, 10)`, which is
+ * always UTC's date and wrong for most users for hours of every day. Deliberately out of
+ * scope: a settings UI to change timezone by hand.
+ *
+ * The browser side lives in src/components/layout/timezone-setup.tsx (first visit) and
+ * timezone-sync.tsx (later changes, e.g. travel).
  *
  * Uses `Intl.DateTimeFormat` (built into Node/browsers) rather than adding a date-fns
  * timezone package — one IANA-aware calendar-date computation doesn't justify a new

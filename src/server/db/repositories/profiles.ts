@@ -8,37 +8,39 @@ export interface Profile {
 }
 
 /**
- * Gets the caller's profile, creating one (default timezone "UTC") the first time they're
- * seen. `ignoreDuplicates` makes this safe under concurrent requests — the second racer's
- * insert is silently skipped by the unique primary key, and both then read the same row.
+ * The caller's profile, or `null` if the browser hasn't reported a timezone yet.
+ *
+ * A profile row exists *only* once a real timezone has been recorded (see `saveTimezone`), so
+ * "no row" means "timezone unknown" — it deliberately does NOT get papered over with a
+ * placeholder. Creating one on first read with the column default `'UTC'` is what used to let
+ * the very first request file a `days` row under UTC before the browser had reported the
+ * user's real zone, producing a second, differently-dated day one request later.
  */
-export async function ensureProfile(
+export async function getProfile(
   supabase: SupabaseServerClient,
   userId: string,
-): Promise<Profile> {
-  const inserted = await supabase
+): Promise<Profile | null> {
+  const { data, error } = await supabase
     .from("profiles")
-    .upsert({ id: userId }, { onConflict: "id", ignoreDuplicates: true })
     .select("id, timezone")
+    .eq("id", userId)
     .maybeSingle();
-
-  if (inserted.data) return inserted.data;
-  if (inserted.error) {
-    // A concurrent insert can make the upsert itself return no row under ignoreDuplicates
-    // without an error; only a real error path lands here.
-    throw new ExternalServiceError("supabase", { cause: inserted.error });
-  }
-
-  const existing = await supabase.from("profiles").select("id, timezone").eq("id", userId).single();
-  if (existing.error) throw new ExternalServiceError("supabase", { cause: existing.error });
-  return existing.data;
+  if (error) throw new ExternalServiceError("supabase", { cause: error });
+  return data;
 }
 
-export async function updateTimezone(
+/**
+ * Records the timezone the browser reported, creating the profile if this is the first time.
+ * This is INSERT ... ON CONFLICT DO UPDATE, which is fine here (unlike the append-only
+ * plans/plan_revisions tables) because `profiles` has both an INSERT and an UPDATE RLS policy.
+ */
+export async function saveTimezone(
   supabase: SupabaseServerClient,
   userId: string,
   timezone: string,
 ): Promise<void> {
-  const { error } = await supabase.from("profiles").update({ timezone }).eq("id", userId);
+  const { error } = await supabase
+    .from("profiles")
+    .upsert({ id: userId, timezone }, { onConflict: "id" });
   if (error) throw new ExternalServiceError("supabase", { cause: error });
 }

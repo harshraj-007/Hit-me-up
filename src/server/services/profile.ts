@@ -1,17 +1,16 @@
 import "server-only";
 import { requireUserForAction } from "@/server/auth/session";
 import { createSupabaseServerClient } from "@/server/db/supabase-server";
-import { ensureProfile, updateTimezone } from "@/server/db/repositories/profiles";
+import { getProfile, saveTimezone } from "@/server/db/repositories/profiles";
 import { isValidTimeZone } from "@/domain/days";
 import { timezoneSchema } from "@/lib/validation/day";
 import { ValidationError } from "@/server/errors";
 
 /**
- * The one-time (per browser, effectively) timezone capture described in
- * domain/days/timezone.ts: the client reports `Intl.DateTimeFormat().resolvedOptions().timeZone`
- * once, this records it, and every later "what's today" computation uses it. Silently
- * ignores a timezone matching what's already stored, so this is safe to call on every page
- * load without writing on every request.
+ * Records the timezone the browser reports — and is the ONLY thing that creates a profile, so
+ * a profile row's existence means "timezone confirmed by a real browser". `findCurrentDay`
+ * relies on that: until this has run, no day is created at all. Skips the write when the
+ * stored value already matches, so it is safe to call on every page load.
  */
 export async function syncTimezone(rawInput: unknown): Promise<void> {
   const user = await requireUserForAction();
@@ -21,8 +20,8 @@ export async function syncTimezone(rawInput: unknown): Promise<void> {
   }
 
   const supabase = await createSupabaseServerClient();
-  const profile = await ensureProfile(supabase, user.id);
-  if (profile.timezone === timezone) return;
+  const profile = await getProfile(supabase, user.id);
+  if (profile?.timezone === timezone) return;
 
-  await updateTimezone(supabase, user.id, timezone);
+  await saveTimezone(supabase, user.id, timezone);
 }
