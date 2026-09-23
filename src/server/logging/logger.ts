@@ -29,6 +29,13 @@ function serializeError(error: unknown): unknown {
     message: redactString(error.message),
   };
   if ("code" in error && typeof error.code === "string") out.code = error.code;
+  // Postgres/PostgREST errors carry the diagnosis in `details` and `hint`, not just `message`.
+  // Dropping them made "which constraint/policy?" unanswerable from logs alone.
+  const fields: Record<string, unknown> = { ...error };
+  for (const key of ["details", "hint"]) {
+    const value = fields[key];
+    if (typeof value === "string") out[key] = redactString(value);
+  }
   if (!isProd && error.stack) out.stack = redactString(error.stack);
   if (error.cause) out.cause = serializeError(error.cause);
   return out;

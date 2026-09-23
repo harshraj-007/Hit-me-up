@@ -29,4 +29,17 @@ describe("logger", () => {
     logger.info("quiet");
     expect(spy).not.toHaveBeenCalled();
   });
+  it("keeps a database error's details and hint (the parts that name the constraint/policy)", () => {
+    const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const dbError = Object.assign(new Error("duplicate key value"), {
+      code: "23505",
+      details: "Key (day_id)=(abc) already exists. Bearer abc.def",
+      hint: "Use ON CONFLICT",
+    });
+    logger.error("db failed", { err: dbError });
+    const line = JSON.parse(String(spy.mock.calls[0]?.[0]));
+    expect(line.err).toMatchObject({ code: "23505", hint: "Use ON CONFLICT" });
+    expect(line.err.details).toContain("already exists");
+    expect(line.err.details).not.toContain("abc.def");
+  });
 });

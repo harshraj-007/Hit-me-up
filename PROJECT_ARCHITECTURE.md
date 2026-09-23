@@ -1,6 +1,6 @@
 # Project Architecture — Personal AI Daily Dashboard
 
-Status: **Phase 1 complete.** Foundation is scaffolded; this document is the contract for later phases.
+Status: **Phase 3 complete.** Database, domain model and real persistence are live; the Today dashboard reads and writes Postgres through Supabase Auth. AI planning, reminders and reports are still ahead.
 
 ## 1. Product in one line
 
@@ -203,9 +203,148 @@ Applied in Phase 1 (the owner had not yet answered the Phase 0 questions, so the
 - **Motion:** `src/lib/motion` (tokens, single reduced-motion gate, lazy GSAP/Anime loaders). `@gsap/react` is deferred until the motion phase.
 - CI: `.github/workflows/ci.yml` (lint, typecheck, unit, e2e). No build step is separate because e2e builds.
 
-## 16. Open decisions (still need approval)
+## 16. Phase 3 — database and application state
 
-- **D3 Auth method and access control:** magic link vs Google OAuth vs both; single-user allow-list vs open sign-up.
+Phase 3 turned the Phase 2 visual shell (mock data in `src/mock/`, deleted this phase) into a
+real, persisted application: Postgres via Supabase is now the source of truth for days,
+briefings, tasks, task history and a minimal plan/revision thread, and Today reads and
+writes it through a real authenticated session. No AI, reminders, cron or reports —
+those remain future phases.
+
+### Why authentication had to be built here
+
+Section 7 above ("Phase 1 outcomes") said auth was a Phase 2 placeholder. Phase 2 then
+stayed mock-data-only and never returned to it, so by the start of Phase 3 the app had only
+ever built the **guard** (`requireUser()` redirecting to `/login`) — nothing actually issued
+a session. Phase 3 cannot demonstrate "an authenticated user's data persists" without one,
+so the smallest fix that unblocks the phase without redesigning anything was added:
+
+- **Passwordless email sign-in** (`supabase.auth.signInWithOtp`), a real form at `/login`
+  (`src/app/(auth)/login/`), and `/auth/callback` (`src/app/auth/callback/route.ts`)
+  exchanging the PKCE code for a session.
+- **`src/proxy.ts`** (Next.js 16 renamed `middleware.ts` → `proxy.ts` mid-phase; this repo
+  uses the new convention) refreshes the session cookie on every request — Server
+  Components can read cookies but not write them, so without this a long-lived session
+  would eventually go stale.
+- A minimal **sign-out** control in the sidebar (`src/components/layout/app-shell.tsx`).
+- Open sign-up: anyone who can receive email at an address can create an account. There is
+  no invite/allow-list — see the open decisions below.
+
+### Magic-link constraints (current behavior)
+
+- **A magic link only works in the browser context that requested it.** The link Supabase
+  emails by default comes back to `/auth/callback` as a PKCE `?code=`. Exchanging it needs a
+  `code_verifier` that was stored in a cookie when the sign-in was requested, so opening the
+  link from a mail app that launches a _different_ browser (or from another device) fails with
+  `AuthPKCECodeVerifierMissingError: PKCE code verifier not found in storage` and lands on
+  `/login?error=auth`. This is how PKCE is designed to behave, not a bug that can be patched
+  around without weakening it.
+- **The cross-browser fix is written but blocked.** `src/app/auth/confirm/route.ts` verifies a
+  `token_hash` with `verifyOtp` (no cookie needed, so it works from any browser or device), and
+  `supabase/templates/magic_link.html` is the matching email template. Pushing that template
+  is refused by Supabase: _"Email template modification is not available for free tier
+  projects using the default email provider."_ The `[auth.email.template.magic_link]` block in
+  `supabase/config.toml` is therefore commented out on purpose, and `/auth/confirm` is
+  **inactive** — nothing links to it. Its `next` parameter is restricted to same-site paths
+  (`src/lib/validation/redirect.ts`), so it is safe to leave deployed.
+- **Future path:** configure a custom SMTP provider (Resend is already in this project's
+  later-phase stack) or upgrade the plan, then uncomment the template block and run
+  `supabase config push`. Until then, request the link and open it in the same browser.
+- **Rate limits** on this project's default email provider (from its pulled config): 2
+  magic-link emails per hour project-wide and 1 per minute per address. Exceeding either
+  surfaces as `over_email_send_rate_limit` (shown to the user as "A required upstream service
+  failed.").
+
+### Schema
+
+One migration, `supabase/migrations/20260922120000_init_schema.sql`, is the entire schema.
+Every table carries its own `user_id uuid references auth.users(id)` — **not** a second
+identity system; `auth.users.id` is the one stable key everything hangs off.
+
+| Table            | Purpose                                             | Key constraints                                                                                                              |
+| ---------------- | --------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------- |
+| `profiles`       | Holds `timezone`; nothing Supabase Auth already has | PK = `auth.users.id` (1:1, not a second credential store)                                                                    |
+| `days`           | One row per (user, calendar date)                   | `unique (user_id, local_date)` — the actual idempotency guard, not app code                                                  |
+| `briefings`      | Append-only briefing text per day                   | insert-only; "current" = most recent row by `created_at`                                                                     |
+| `tasks`          | The core scheduled item                             | `status` ∈ upcoming/completed/skipped/late; `scheduled_end > scheduled_start`; `completed_at` set iff `status = 'completed'` |
+| `task_history`   | Append-only status-change audit log                 | one row per creation + per transition; never updated                                                                         |
+| `plans`          | The planning thread for a day                       | `unique (day_id)` — at most one plan per day                                                                                 |
+| `plan_revisions` | Version marker within a plan                        | `unique (plan_id, revision_number)`                                                                                          |
+
+Relationships: `days 1—1 plans 1—N plan_revisions`; `days 1—N tasks`; `tasks 1—N task_history`; `days 1—N briefings`. Tasks reference `day_id` directly (not `plan_id`/`plan_revision_id`) — see "plan/revision semantics" below for why.
+
+### RLS strategy
+
+Every table has RLS enabled and policies scoped `to authenticated using/with check ((select auth.uid()) = user_id)` (the `select` wrapper is Supabase's documented pattern so the planner evaluates `auth.uid()` once, not per row). `task_history` and `plan_revisions` denormalize `user_id` from their parent row specifically so their policies are a direct column check rather than a join — cheaper and harder to get wrong. There is **no service-role client anywhere** in the app; every table is reachable exactly to its owner through the anon-key, cookie-scoped client already established in Phase 1 (`src/server/db/supabase-server.ts`).
+
+Two SQL functions (`create_task_with_history`, `change_task_status`, bottom of the migration) exist purely for **atomicity** — a task write and its history row must both happen or neither does. Both are `security invoker` with `search_path = ''` and fully qualified references: they run with the caller's own privileges and are just as RLS-bound as a direct table write, so they grant no privilege escalation. `change_task_status`'s `UPDATE ... WHERE status = 'upcoming'` is also where the "resolved tasks are terminal" rule is enforced a second time, at the database layer — see "task lifecycle" below.
+
+**RLS is defined and documented but not live-verified.** This sandbox has no Docker/Supabase CLI, so nothing here has run against a real Postgres instance. `supabase/tests/rls_isolation.sql` is a from-scratch isolation check (creates two users, impersonates each via `request.jwt.claims`, asserts user B can't read/write/RPC user A's rows) — run it with `supabase start && supabase db reset` and the `psql` command documented at the top of that file. Treat both the migration and this test as reviewed-but-unverified until someone runs them for real.
+
+### Task lifecycle
+
+Persisted status is a 4-way enum: `upcoming | completed | skipped | late`. **`current` is deliberately not persisted** — the Phase 2 UI's fifth status is derived at read time (`src/domain/tasks/derive-status.ts`): an `upcoming` task whose `[scheduled_start, scheduled_end)` window contains `now` displays as `current`; everything else displays exactly as stored. Storing `current` as real state would need a background job to expire it again once the window passed, and scheduled jobs are explicitly out of this phase's scope — deriving it avoids that entirely, and matches how Phase 2's mock day already behaved (a snapshot computed once per load, not continuously re-derived).
+
+`completed`, `skipped` and `late` are **resolved/terminal** (`src/domain/tasks/transitions.ts`). The only legal transition is `upcoming → {completed, skipped, late}`; nothing else is allowed, enforced identically in three places for defense in depth:
+
+1. `src/domain/tasks/transitions.ts` — the pure rule, unit-tested directly.
+2. `src/server/services/tasks.ts` — checks the task's actual current status before ever touching the database, so the user gets a clear "already resolved" message instead of a generic failure.
+3. `change_task_status()`'s SQL `WHERE status = 'upcoming'` — the rule holds even if step 2 were ever bypassed or called incorrectly.
+
+A user-created task's `source` is always `'user'`; the column exists (rather than being added later) so a future AI planner can tell its own rows apart from the user's and never silently rewrite or delete one it didn't create.
+
+### Task history
+
+Every creation and every status change appends a `task_history` row (`previous_status` null for creation) inside the same atomic RPC as the mutation itself — never a separate, potentially-inconsistent write. It is not surfaced in the UI yet and there is no analytics on top of it; it exists so a future report/replan phase has a trustworthy log to read instead of needing to infer history from current state.
+
+### Plan/revision semantics
+
+A `plan` is the planning thread for a day (`unique (day_id)`); a `plan_revision` is a version marker inside it. `resolveCurrentDay` → `ensurePlan` creates exactly one revision (`revision_number = 1`, `source = 'system'`) the first time a day is initialized, establishing the `Day → Plan → Revisions` chain a future AI-replanning phase can extend by inserting revision 2, 3, ... rather than mutating revision 1 — satisfying "replanning must never destroy the previous plan" from day one, before there's anything to replan yet.
+
+**Deliberately not built:** revisions hold no task snapshot, and tasks reference `day_id` directly, not `plan_id`/`plan_revision_id`. Nothing in this phase produces or consumes a snapshot — inventing that shape now would be guessing at a future phase's actual needs, which the phase brief explicitly warned against ("do not create speculative tables for every future feature").
+
+### Timezone strategy
+
+`profiles.timezone` (IANA name, default `'UTC'`) is the one deliberate piece of state. `src/domain/days/timezone.ts` resolves "today" as `Intl.DateTimeFormat('en-CA', { timeZone }).format(now)` — never `new Date().toISOString().slice(0, 10)`, which is always UTC's date and wrong for most users most of the day. `Intl` is built into Node/browsers, so this needed no new dependency (`@date-fns/tz` was in the Phase 0 plan but wasn't needed).
+
+There is no settings UI. Instead, `src/components/layout/timezone-sync.tsx` reads the browser's real zone (`Intl.DateTimeFormat().resolvedOptions().timeZone`) once per browser (cached in `localStorage`) and reports it through a server action; every later "what's today" computation uses whatever is on the profile. This is the whole mechanism — a real per-user timezone without building a settings page.
+
+### Data-access architecture
+
+```
+UI (features/dashboard) → Server Action (features/dashboard/actions.ts, "use server")
+  → service (server/services/*.ts: auth + Zod validation + domain checks)
+    → repository (server/db/repositories/*.ts: typed Supabase calls only)
+      → Postgres (RLS-enforced)
+```
+
+Repositories are the only files that import the Supabase client's query builder directly; nothing above them constructs a query. Every repository function takes the request-scoped client as a parameter (dependency injection) rather than creating its own, which is what makes the service-layer tests possible without a live database (`src/server/services/tasks.test.ts` etc. mock the repository functions, not the SQL). `src/server/errors/action.ts` (`runAction`) is the Server-Action counterpart of Phase 1's `withErrorHandling`/`errorResponse` — same `AppError` classification, logging and redaction, returned as `{ ok, data | error }` instead of a `NextResponse` because a Server Action's thrown errors don't reach the browser as a normal HTTP response.
+
+`src/server/db/database.types.ts` is a **hand-written** stand-in for `supabase gen types typescript` (no CLI in this sandbox to run it) — keep it in sync with the migration by hand until the project is linked, then regenerate it for real.
+
+### Important invariants
+
+- A user has at most one `days` row per calendar date — enforced by `days_user_date_unique`, not application logic; `getOrCreateDay`'s upsert is what makes opening Today from two tabs at once safe.
+- A day has at most one `plans` row — `plans_day_unique`.
+- A task's `day_id` is **never** taken from client input — every mutating action re-resolves "today" server-side (`resolveCurrentDay`), so a stale client value (or a spoofed one) can't misfile a task, and a session that crosses real midnight correctly starts filing into the new day.
+- `completed_at is not null` iff `status = 'completed'` — a CHECK constraint, not just convention.
+- No mutation is optimistic: the UI updates local state only from what an action actually returned, never speculatively, so there is nothing to roll back on failure (`src/features/dashboard/dashboard-view.tsx`).
+
+### Testing reality check
+
+Everything that doesn't need a live Postgres instance is covered by the unit suite (`npm test`): `src/domain/**`, `src/lib/validation/**`, the repositories against a recording fake client, and the service layer against mocked repositories/auth.
+
+What has **not** been automated or executed:
+
+- **Cross-user RLS isolation has not been executed against the live project.** `supabase/tests/rls_isolation.sql` (two fixture users; asserts user B can't read or write user A's rows) has never been run. It is syntactically valid (parsed with PostgreSQL's own grammar) but that is all that has been established. It needs a local `supabase start` stack (Docker) and `psql`; it is deliberately _not_ run against the hosted project because it inserts fixture rows into `auth.users`. What _was_ verified live, with a real session and the anon key: an anonymous caller cannot execute either mutation RPC, cannot read or write any table, and the signed-in user's own create/complete/skip flow persists and is stable across refreshes.
+- **The persisted-Today E2E (`tests/e2e/persisted-today.spec.ts`) remains `test.skip`.** It needs a real authenticated session, and the only sign-in path is a magic link delivered by real email. There is no password login or dev bypass, by design. Automating it needs either a local Supabase stack with a test inbox (Inbucket/Mailpit) or a session seeded via the Admin API — the latter must match the project's auth flow type (PKCE `?code=` vs implicit) that `/auth/callback` actually handles. The same steps were performed by hand against the hosted project.
+
+## 17. Open decisions (still need approval)
+
+- ~~**D3 Auth method**~~ — resolved this phase: passwordless email magic link, open sign-up (see "Why authentication had to be built here" above).
+- **D3b Access control:** open sign-up today — anyone with an email address can create an account. Add an invite/allow-list before this is genuinely "personal."
+- **D8 RLS/E2E verification:** cross-user RLS isolation is not executed against the live project, and the persisted-Today E2E stays skipped because it needs a real authenticated email session (see "Testing reality check"). Run `supabase/tests/rls_isolation.sql` on a local stack and choose an E2E session strategy before treating either as verified.
+- **D9 Email delivery / cross-browser magic links:** the `/auth/confirm` + template fix is blocked by Supabase's free-tier default email provider. Choose custom SMTP (e.g. Resend) or a paid plan, then enable the template (see "Magic-link constraints").
 - **D5 Scheduling:** Vercel Cron on current plan vs external trigger (e.g. Supabase pg_cron/Edge) for minute-level reminders.
 - **D6 Rate limiting:** Postgres-backed counters (no new service) vs Upstash Redis.
 - **D7 Claude model:** default model for planning and whether a cheaper model handles reports.

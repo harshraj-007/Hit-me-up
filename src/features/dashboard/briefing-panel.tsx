@@ -1,21 +1,25 @@
 "use client";
 
 import { useId, useState } from "react";
-import { Sparkles } from "lucide-react";
+import { Loader2, Save } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { mockBriefingText } from "@/mock/today";
-import { PlanGenerating } from "./plan-generating";
 
 export interface BriefingPanelProps {
-  isGenerating: boolean;
-  onReplan: (briefing: string) => void;
+  initialText: string;
+  isSaving: boolean;
+  onSave: (briefing: string) => void;
 }
 
-/** Briefing capture + the (placeholder) trigger for AI replanning. Real generation is Phase 4. */
-export function BriefingPanel({ isGenerating, onReplan }: BriefingPanelProps) {
-  const [text, setText] = useState(mockBriefingText.trim());
+/**
+ * Briefing capture. Saving persists a new (append-only — see the migration) briefing row;
+ * there is no AI planning here yet, so this is deliberately just a save action, not the
+ * "Replan my day" placeholder Phase 2 shipped for a feature that didn't exist yet.
+ */
+export function BriefingPanel({ initialText, isSaving, onSave }: BriefingPanelProps) {
+  const [text, setText] = useState(initialText);
   const id = useId();
   const headingId = `${id}-heading`;
+  const hasContent = text.trim().length > 0;
 
   return (
     <section
@@ -27,7 +31,7 @@ export function BriefingPanel({ isGenerating, onReplan }: BriefingPanelProps) {
         This morning&rsquo;s briefing
       </h2>
       <p className="mt-1 text-xs text-muted">
-        What&rsquo;s on your plate today? Edit it any time circumstances change, then replan.
+        What&rsquo;s on your plate today? Jot it down — planning from it comes in a later phase.
       </p>
       <label htmlFor={id} className="sr-only">
         Today&rsquo;s briefing
@@ -37,22 +41,19 @@ export function BriefingPanel({ isGenerating, onReplan }: BriefingPanelProps) {
         value={text}
         onChange={(e) => setText(e.target.value)}
         rows={4}
+        placeholder="e.g. Finish problem set 4, chem lab questions are due today, grab groceries…"
         className="mt-3 w-full resize-none rounded-md border border-border bg-background p-2.5 text-sm text-foreground placeholder:text-muted focus-visible:ring-2 focus-visible:ring-accent focus-visible:outline-none"
       />
-      <div className="mt-3 flex flex-wrap items-center justify-between gap-3">
-        <p className="text-xs text-muted">
-          Mock data — the plan below is a fixed placeholder, not real AI output.
-        </p>
-        <Button size="sm" onClick={() => onReplan(text)} disabled={isGenerating}>
-          <Sparkles aria-hidden className="size-4" />
-          {isGenerating ? "Replanning…" : "Replan my day"}
+      <div className="mt-3 flex justify-end">
+        <Button size="sm" onClick={() => onSave(text)} disabled={isSaving || !hasContent}>
+          {isSaving ? (
+            <Loader2 aria-hidden className="size-4 animate-spin" />
+          ) : (
+            <Save aria-hidden className="size-4" />
+          )}
+          {isSaving ? "Saving…" : "Save briefing"}
         </Button>
       </div>
-      {isGenerating ? (
-        <div className="mt-3">
-          <PlanGenerating />
-        </div>
-      ) : null}
     </section>
   );
 }

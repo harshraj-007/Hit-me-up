@@ -7,6 +7,19 @@ test.describe("foundation smoke", () => {
     await expect(page.getByRole("heading", { name: "Sign in" })).toBeVisible();
   });
 
+  test("login page offers a real magic-link form", async ({ page }) => {
+    await page.goto("/login");
+    const emailField = page.getByLabel("Email");
+    await expect(emailField).toBeVisible();
+    await expect(page.getByRole("button", { name: "Send sign-in link" })).toBeVisible();
+
+    // Submitting an obviously invalid address never reaches Supabase — the browser's own
+    // HTML5 validation (type="email", required) blocks it, so the page doesn't navigate.
+    await emailField.fill("not-an-email");
+    await page.getByRole("button", { name: "Send sign-in link" }).click();
+    await expect(page).toHaveURL(/\/login$/);
+  });
+
   test("root path is protected as well", async ({ page }) => {
     await page.goto("/");
     await expect(page).toHaveURL(/\/login$/);

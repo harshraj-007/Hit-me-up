@@ -5,30 +5,48 @@ import { Plus } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { useToast } from "@/components/ui/toast-provider";
 import { useEntrance } from "@/lib/motion";
-import { applyMockReplan, buildMockDay, computeDaySummary } from "@/mock/today";
+import type { Task, TaskStatus } from "@/domain/tasks";
+import { updateTaskStatusAction, saveBriefingAction } from "./actions";
 import { AddTaskDialog } from "./add-task-dialog";
 import { BriefingPanel } from "./briefing-panel";
 import { DashboardHeader } from "./dashboard-header";
+import { toDashboardTask } from "./map-task";
+import { computeDaySummary } from "./summary";
 import { TodayTimeline } from "./today-timeline";
-import type { DashboardTask, TaskStatus } from "./types";
+import type { DashboardTask } from "./types";
 
-const REPLAN_DELAY_MS = 1400;
 const CLOCK_INTERVAL_MS = 60_000;
 
 function byStart(a: DashboardTask, b: DashboardTask) {
   return a.start.getTime() - b.start.getTime();
 }
 
+export interface DashboardViewProps {
+  initialTasks: Task[];
+  initialBriefingText: string;
+  /** The instant the server snapshot was computed — the starting point for the client's
+   *  own ticking clock, and what "current" was derived against for `initialTasks`. */
+  initialNow: Date;
+}
+
 /**
- * Owns all Today-page state. Everything here is client-local mock state — no persistence,
- * no server calls — so the visual shell can be exercised end to end before Phase 3 wires
- * up the database and Phase 4 wires up real AI planning.
+ * Owns Today-page UI state. The data itself lives in Postgres: every mutation here calls a
+ * Server Action (src/features/dashboard/actions.ts) and only updates local state from what
+ * that action actually persisted — never optimistically, so there's nothing to roll back if
+ * it fails (see PROJECT_ARCHITECTURE.md's Phase 3 notes on this choice).
  */
-export function DashboardView() {
-  const [dayAnchor] = useState(() => new Date());
-  const [tasks, setTasks] = useState<DashboardTask[]>(() => buildMockDay(dayAnchor));
-  const [now, setNow] = useState(() => new Date());
-  const [isGenerating, setIsGenerating] = useState(false);
+export function DashboardView({
+  initialTasks,
+  initialBriefingText,
+  initialNow,
+}: DashboardViewProps) {
+  const [tasks, setTasks] = useState<DashboardTask[]>(() =>
+    initialTasks.map((t) => toDashboardTask(t, initialNow)).sort(byStart),
+  );
+  const [briefingText, setBriefingText] = useState(initialBriefingText);
+  const [now, setNow] = useState(initialNow);
+  const [pendingTaskId, setPendingTaskId] = useState<string | null>(null);
+  const [isSavingBriefing, setIsSavingBriefing] = useState(false);
   const [addOpen, setAddOpen] = useState(false);
   const { toast } = useToast();
   const scope = useEntrance<HTMLDivElement>({
@@ -43,32 +61,58 @@ export function DashboardView() {
 
   const summary = useMemo(() => computeDaySummary(tasks, now), [tasks, now]);
 
-  function setStatus(
-    id: string,
-    status: TaskStatus,
-    toastOptions: { title: string; tone?: "success" },
+  async function handleStatusChange(
+    taskId: string,
+    status: Extract<TaskStatus, "completed" | "skipped" | "late">,
   ) {
-    const task = tasks.find((t) => t.id === id);
-    setTasks((prev) => prev.map((t) => (t.id === id ? { ...t, status } : t)));
-    toast({ ...toastOptions, description: task?.title });
+    if (pendingTaskId) return; // one mutation at a time is plenty for a single-user dashboard
+    setPendingTaskId(taskId);
+    try {
+      const result = await updateTaskStatusAction({ taskId, status });
+      if (!result.ok) {
+        toast({ title: "Couldn't update task", description: result.error.message, tone: "error" });
+        return;
+      }
+      const updated = toDashboardTask(result.data, now);
+      setTasks((prev) => prev.map((t) => (t.id === taskId ? updated : t)));
+      const label =
+        status === "completed"
+          ? "Marked complete"
+          : status === "skipped"
+            ? "Skipped"
+            : "Marked late";
+      toast({
+        title: label,
+        description: updated.title,
+        tone: status === "completed" ? "success" : "neutral",
+      });
+    } finally {
+      setPendingTaskId(null);
+    }
   }
 
-  function handleAdd(task: DashboardTask) {
-    setTasks((prev) => [...prev, task].sort(byStart));
+  function handleCreated(task: Task) {
+    setTasks((prev) => [...prev, toDashboardTask(task, now)].sort(byStart));
     toast({ title: "Task added", description: task.title, tone: "success" });
   }
 
-  function handleReplan() {
-    setIsGenerating(true);
-    window.setTimeout(() => {
-      setTasks((prev) => applyMockReplan(prev, now));
-      setIsGenerating(false);
-      toast({
-        title: "Day replanned",
-        description: "Updated today's plan around what changed.",
-        tone: "success",
-      });
-    }, REPLAN_DELAY_MS);
+  async function handleSaveBriefing(text: string) {
+    setIsSavingBriefing(true);
+    try {
+      const result = await saveBriefingAction({ rawText: text });
+      if (!result.ok) {
+        toast({
+          title: "Couldn't save briefing",
+          description: result.error.message,
+          tone: "error",
+        });
+        return;
+      }
+      setBriefingText(result.data.rawText);
+      toast({ title: "Briefing saved", tone: "success" });
+    } finally {
+      setIsSavingBriefing(false);
+    }
   }
 
   return (
@@ -99,22 +143,23 @@ export function DashboardView() {
           </div>
           <TodayTimeline
             tasks={tasks}
-            onComplete={(id) =>
-              setStatus(id, "completed", { title: "Marked complete", tone: "success" })
-            }
-            onSkip={(id) => setStatus(id, "skipped", { title: "Skipped" })}
-            onMarkLate={(id) =>
-              setStatus(id, "late", { title: "Marked late — it'll need a new slot" })
-            }
+            pendingTaskId={pendingTaskId}
+            onComplete={(id) => void handleStatusChange(id, "completed")}
+            onSkip={(id) => void handleStatusChange(id, "skipped")}
+            onMarkLate={(id) => void handleStatusChange(id, "late")}
           />
         </section>
 
         <div className="order-first lg:sticky lg:top-6 lg:order-2">
-          <BriefingPanel isGenerating={isGenerating} onReplan={handleReplan} />
+          <BriefingPanel
+            initialText={briefingText}
+            isSaving={isSavingBriefing}
+            onSave={handleSaveBriefing}
+          />
         </div>
       </div>
 
-      <AddTaskDialog open={addOpen} onOpenChange={setAddOpen} now={now} onAdd={handleAdd} />
+      <AddTaskDialog open={addOpen} onOpenChange={setAddOpen} now={now} onCreated={handleCreated} />
     </div>
   );
 }

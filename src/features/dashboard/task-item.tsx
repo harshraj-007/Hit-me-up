@@ -39,10 +39,19 @@ export interface TaskItemProps {
   onComplete: (id: string) => void;
   onSkip: (id: string) => void;
   onMarkLate: (id: string) => void;
+  /** True while this task's own status change is in flight — disables its actions so a
+   *  second click can't race the first (see DashboardView's pendingTaskId). */
+  isPending?: boolean;
 }
 
 /** One row of the timeline. Status and priority are always paired with an icon + label. */
-export function TaskItem({ task, onComplete, onSkip, onMarkLate }: TaskItemProps) {
+export function TaskItem({
+  task,
+  onComplete,
+  onSkip,
+  onMarkLate,
+  isPending = false,
+}: TaskItemProps) {
   const iconRef = useRef<HTMLSpanElement>(null);
   const status = statusStyles[task.status];
   const priority = priorityStyles[task.priority];
@@ -100,27 +109,30 @@ export function TaskItem({ task, onComplete, onSkip, onMarkLate }: TaskItemProps
         {task.note ? <p className="mt-1 text-xs text-muted">{task.note}</p> : null}
 
         {actionable ? (
-          <div className="mt-2 flex gap-1">
+          <div className="mt-2 flex gap-1" aria-busy={isPending}>
             <button
               type="button"
+              disabled={isPending}
               onClick={() => runAction(onComplete)}
-              className="inline-flex items-center gap-1 rounded-sm px-1.5 py-1 text-xs font-medium text-status-completed transition-colors hover:bg-status-completed-soft"
+              className="inline-flex items-center gap-1 rounded-sm px-1.5 py-1 text-xs font-medium text-status-completed transition-colors hover:bg-status-completed-soft disabled:pointer-events-none disabled:opacity-40"
             >
               <Check aria-hidden className="size-3.5" />
               Complete
             </button>
             <button
               type="button"
+              disabled={isPending}
               onClick={() => runAction(onSkip)}
-              className="inline-flex items-center gap-1 rounded-sm px-1.5 py-1 text-xs font-medium text-muted transition-colors hover:bg-surface-hover hover:text-foreground"
+              className="inline-flex items-center gap-1 rounded-sm px-1.5 py-1 text-xs font-medium text-muted transition-colors hover:bg-surface-hover hover:text-foreground disabled:pointer-events-none disabled:opacity-40"
             >
               <SkipForward aria-hidden className="size-3.5" />
               Skip
             </button>
             <button
               type="button"
+              disabled={isPending}
               onClick={() => runAction(onMarkLate)}
-              className="inline-flex items-center gap-1 rounded-sm px-1.5 py-1 text-xs font-medium text-status-late transition-colors hover:bg-status-late-soft"
+              className="inline-flex items-center gap-1 rounded-sm px-1.5 py-1 text-xs font-medium text-status-late transition-colors hover:bg-status-late-soft disabled:pointer-events-none disabled:opacity-40"
             >
               <Clock aria-hidden className="size-3.5" />
               Mark late

@@ -14,6 +14,8 @@ export interface TodayTimelineProps {
   onComplete: (id: string) => void;
   onSkip: (id: string) => void;
   onMarkLate: (id: string) => void;
+  /** The task whose status change is currently being persisted, if any. */
+  pendingTaskId?: string | null;
 }
 
 /**
@@ -23,7 +25,13 @@ export interface TodayTimelineProps {
  * marker crosses a task boundary, Flip animates the resulting reflow instead of letting it
  * jump.
  */
-export function TodayTimeline({ tasks, onComplete, onSkip, onMarkLate }: TodayTimelineProps) {
+export function TodayTimeline({
+  tasks,
+  onComplete,
+  onSkip,
+  onMarkLate,
+  pendingTaskId = null,
+}: TodayTimelineProps) {
   const [now, setNow] = useState(() => new Date());
   const listRef = useEntrance<HTMLUListElement>({
     selector: "[data-animate='task'], [data-now-line]",
@@ -63,7 +71,7 @@ export function TodayTimeline({ tasks, onComplete, onSkip, onMarkLate }: TodayTi
     return (
       <EmptyState
         title="Nothing planned yet"
-        description="Add this morning's briefing below and generate a plan to see your day here."
+        description="Add a task to start building out today's timeline."
       />
     );
   }
@@ -90,6 +98,7 @@ export function TodayTimeline({ tasks, onComplete, onSkip, onMarkLate }: TodayTi
             onComplete={onComplete}
             onSkip={onSkip}
             onMarkLate={onMarkLate}
+            isPending={pendingTaskId === item.task.id}
           />
         ) : (
           <NowLine key={item.key} now={now} />

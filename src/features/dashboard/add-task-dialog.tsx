@@ -5,29 +5,39 @@ import clsx from "clsx";
 import { addMinutes } from "date-fns";
 import { Dialog } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
-import type { DashboardTask, TaskPriority } from "./types";
+import type { Task } from "@/domain/tasks";
+import { createTaskAction } from "./actions";
+import type { TaskPriority } from "./types";
 
 export interface AddTaskDialogProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   now: Date;
-  onAdd: (task: DashboardTask) => void;
+  onCreated: (task: Task) => void;
 }
 
 const PRIORITIES: TaskPriority[] = ["high", "medium", "low"];
 
-export function AddTaskDialog({ open, onOpenChange, now, onAdd }: AddTaskDialogProps) {
+/**
+ * Owns its own submission: it calls the server action directly, shows a Zod validation
+ * error inline without closing, and only calls `onCreated` (letting the parent update local
+ * state + show a success toast) once the task is actually persisted.
+ */
+export function AddTaskDialog({ open, onOpenChange, now, onCreated }: AddTaskDialogProps) {
   const baseId = useId();
   const [title, setTitle] = useState("");
   const [priority, setPriority] = useState<TaskPriority>("medium");
   const [minutesFromNow, setMinutesFromNow] = useState(30);
   const [durationMinutes, setDurationMinutes] = useState(30);
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
   function reset() {
     setTitle("");
     setPriority("medium");
     setMinutesFromNow(30);
     setDurationMinutes(30);
+    setError(null);
   }
 
   function close() {
@@ -35,21 +45,28 @@ export function AddTaskDialog({ open, onOpenChange, now, onAdd }: AddTaskDialogP
     onOpenChange(false);
   }
 
-  function handleSubmit(event: FormEvent) {
+  async function handleSubmit(event: FormEvent) {
     event.preventDefault();
-    const trimmed = title.trim();
-    if (!trimmed) return;
-    const start = addMinutes(now, Math.max(0, minutesFromNow));
-    onAdd({
-      id: crypto.randomUUID(),
-      title: trimmed,
-      start,
-      end: addMinutes(start, Math.max(5, durationMinutes)),
-      status: "upcoming",
-      priority,
-      kind: "flexible",
-    });
-    close();
+    setError(null);
+    setIsSubmitting(true);
+    try {
+      const start = addMinutes(now, Math.max(0, minutesFromNow));
+      const result = await createTaskAction({
+        title,
+        priority,
+        kind: "flexible",
+        scheduledStart: start,
+        scheduledEnd: addMinutes(start, Math.max(5, durationMinutes)),
+      });
+      if (!result.ok) {
+        setError(result.error.issues?.[0]?.message ?? result.error.message);
+        return;
+      }
+      onCreated(result.data);
+      close();
+    } finally {
+      setIsSubmitting(false);
+    }
   }
 
   return (
@@ -132,12 +149,24 @@ export function AddTaskDialog({ open, onOpenChange, now, onAdd }: AddTaskDialogP
           </div>
         </fieldset>
 
+        {error ? (
+          <p role="alert" className="text-sm text-danger">
+            {error}
+          </p>
+        ) : null}
+
         <div className="mt-1 flex justify-end gap-2">
-          <Button type="button" variant="secondary" size="sm" onClick={close}>
+          <Button
+            type="button"
+            variant="secondary"
+            size="sm"
+            onClick={close}
+            disabled={isSubmitting}
+          >
             Cancel
           </Button>
-          <Button type="submit" size="sm">
-            Add task
+          <Button type="submit" size="sm" disabled={isSubmitting}>
+            {isSubmitting ? "Adding…" : "Add task"}
           </Button>
         </div>
       </form>
