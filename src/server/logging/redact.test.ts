@@ -99,4 +99,19 @@ describe("redact", () => {
     expect(nested.endpoint).toBe("[REDACTED]");
     expect((nested.keys as Record<string, unknown>).p256dh).toBe("[REDACTED]");
   });
+
+  it("masks the service-role key and CRON_SECRET by key, wherever they appear (Phase 6.2)", () => {
+    const out = redact({
+      SUPABASE_SERVICE_ROLE_KEY: "srk_secret",
+      serviceRoleKey: "srk_secret",
+      cronSecret: "cron_secret",
+      CRON_SECRET: "cron_secret",
+      claimedCount: 3,
+    }) as Record<string, unknown>;
+    expect(out.SUPABASE_SERVICE_ROLE_KEY).toBe("[REDACTED]");
+    expect(out.serviceRoleKey).toBe("[REDACTED]");
+    expect(out.cronSecret).toBe("[REDACTED]");
+    expect(out.CRON_SECRET).toBe("[REDACTED]");
+    expect(out.claimedCount).toBe(3); // operational metadata is fine — the point is the secrets
+  });
 });

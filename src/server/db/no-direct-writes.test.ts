@@ -17,6 +17,7 @@ const LOCKED = [
   "task_history",
   "ai_proposals",
   "push_subscriptions",
+  "scheduled_notifications",
 ];
 const WRITE = /\.(insert|upsert|update|delete)\s*\(/;
 const SRC = join(process.cwd(), "src");

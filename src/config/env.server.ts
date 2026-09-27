@@ -9,6 +9,10 @@ const serverEnvSchema = z.object({
   // AI is optional: the app runs without these (see getAiConfig).
   ANTHROPIC_API_KEY: z.string().min(1).optional(),
   ANTHROPIC_MODEL: z.string().min(1).optional(),
+  // Phase 6.2: gates POST /api/cron/notifications. Optional like everything else here — the
+  // route fails closed (401) whether it's merely unset or the caller got it wrong; neither is
+  // ever distinguished externally (see getCronSecret()).
+  CRON_SECRET: z.string().min(1).optional(),
 });
 
 export type ServerEnv = z.infer<typeof serverEnvSchema> & PublicEnv;
@@ -57,4 +61,28 @@ export function getAiConfig(): AiConfig | null {
   if (!parsed.success) return null;
   const { ANTHROPIC_API_KEY: apiKey, ANTHROPIC_MODEL: model } = parsed.data;
   return apiKey && model ? { apiKey, model } : null;
+}
+
+/**
+ * The shared secret `POST /api/cron/notifications` requires, or `null` if unset. Like
+ * `getAiConfig`, reads only its own variable and never throws. Vercel Cron sends this exact
+ * value as `Authorization: Bearer <CRON_SECRET>` when the env var is configured, which is the
+ * convention the route checks against (see `src/server/auth/cron.ts`).
+ */
+export function getCronSecret(): string | null {
+  const value = process.env.CRON_SECRET?.trim();
+  return value ? value : null;
+}
+
+/**
+ * The service-role key, or `null` if unset — read directly, like `getCronSecret`/`getAiConfig`,
+ * rather than through `getServerEnv()`'s cached bundle: that cache is a singleton for the
+ * process's lifetime, which is exactly wrong for something `createSupabaseServiceRoleClient`
+ * needs to re-check fresh every call (and makes unit tests that stub the env between cases
+ * predictably fail otherwise). Only `createSupabaseServiceRoleClient` calls this — nothing
+ * else needs the service-role key at all.
+ */
+export function getServiceRoleKey(): string | null {
+  const value = process.env.SUPABASE_SERVICE_ROLE_KEY?.trim();
+  return value ? value : null;
 }

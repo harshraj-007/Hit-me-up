@@ -30,6 +30,10 @@ type PlanRevisionSourceColumn = "system" | "user" | "ai";
 type AiProposalSourceColumn = "typed" | "voice";
 type AiProposalValidationStatusColumn = "valid" | "partially_valid" | "invalid";
 type AiProposalStatusColumn = "generated" | "confirmed" | "discarded";
+/** Phase 6.2. Exactly one kind for MVP; the column exists for future extension. */
+type ScheduledNotificationKindColumn = "task_reminder";
+type ScheduledNotificationStatusColumn =
+  "scheduled" | "claimed" | "sent" | "failed" | "canceled" | "expired";
 
 export interface Database {
   public: {
@@ -271,6 +275,44 @@ export interface Database {
         };
         Relationships: [];
       };
+      scheduled_notifications: {
+        Row: {
+          id: string;
+          user_id: string;
+          task_id: string;
+          day_id: string;
+          kind: ScheduledNotificationKindColumn;
+          fire_at: string;
+          task_scheduled_start_snapshot: string;
+          status: ScheduledNotificationStatusColumn;
+          claimed_at: string | null;
+          attempt_count: number;
+          resolved_at: string | null;
+          created_at: string;
+          updated_at: string;
+        };
+        // Not used directly — the only writer is reconcile_and_claim_notifications() (below),
+        // never .insert()/.update(). Shapes are still real, not `never`, for the same reason
+        // noted above.
+        Insert: {
+          user_id: string;
+          task_id: string;
+          day_id: string;
+          kind?: ScheduledNotificationKindColumn;
+          fire_at: string;
+          task_scheduled_start_snapshot: string;
+          status?: ScheduledNotificationStatusColumn;
+        };
+        Update: {
+          fire_at?: string;
+          task_scheduled_start_snapshot?: string;
+          status?: ScheduledNotificationStatusColumn;
+          claimed_at?: string | null;
+          attempt_count?: number;
+          resolved_at?: string | null;
+        };
+        Relationships: [];
+      };
     };
     Views: Record<string, never>;
     Functions: {
@@ -374,6 +416,11 @@ export interface Database {
           p_endpoint: string;
         };
         Returns: undefined;
+      };
+      reconcile_and_claim_notifications: {
+        Args: Record<PropertyKey, never>;
+        /** The rows claimed THIS invocation only — not the whole table. */
+        Returns: Database["public"]["Tables"]["scheduled_notifications"]["Row"][];
       };
     };
     Enums: Record<string, never>;
