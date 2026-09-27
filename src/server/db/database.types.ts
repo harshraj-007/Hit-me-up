@@ -22,8 +22,10 @@ type HistoryEventColumn = "created" | "status_changed" | "rescheduled" | "replan
 type TaskPriorityColumn = "high" | "medium" | "low";
 type TaskKindColumn = "fixed" | "flexible" | "deadline" | "optional" | "recurring";
 type TaskSourceColumn = "user" | "planner";
-type HistorySourceColumn = "user" | "system";
-type PlanRevisionSourceColumn = "system" | "user";
+/** 'ai' (Phase 5.3): a human-confirmed AI proposal, distinct from a manual 'user' edit and the
+ *  deterministic 'system' planner. */
+type HistorySourceColumn = "user" | "system" | "ai";
+type PlanRevisionSourceColumn = "system" | "user" | "ai";
 
 export interface Database {
   public: {
@@ -241,6 +243,16 @@ export interface Database {
         };
         /** The new plan revision number, or null when nothing changed. */
         Returns: number | null;
+      };
+      confirm_ai_proposal: {
+        Args: {
+          p_day_id: string;
+          p_base_revision: number;
+          /** JSON array of ConfirmChangeRow (see repositories/tasks.ts). */
+          p_changes: unknown;
+        };
+        /** The new plan revision number. Never null: a proposal is always 1-20 changes. */
+        Returns: number;
       };
     };
     Enums: Record<string, never>;

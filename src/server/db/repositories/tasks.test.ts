@@ -1,11 +1,19 @@
 import { describe, expect, it, vi } from "vitest";
-import { ExternalServiceError, NotFoundError, ValidationError } from "@/server/errors";
+import {
+  AiConfirmationError,
+  ExternalServiceError,
+  NotFoundError,
+  ValidationError,
+} from "@/server/errors";
+import type { ConfirmationChange } from "@/domain/ai-planning";
 import {
   applyReplan,
   changeTaskStatus,
+  confirmAiProposal,
   listSpilloverTasks,
   listTasksForDay,
   rescheduleTask,
+  toConfirmChangeRow,
 } from "./tasks";
 
 function fakeSupabase(rpcResult: { data: unknown; error: unknown }) {
@@ -174,5 +182,76 @@ describe("listSpilloverTasks", () => {
       "eq unscheduled=false",
       "gt scheduled_end=2026-09-24T18:30:00.000Z",
     ]);
+  });
+});
+
+describe("toConfirmChangeRow", () => {
+  it("a move carries ref, task_id and new_start — and no other field", () => {
+    const change: ConfirmationChange = {
+      kind: "move",
+      ref: "t1",
+      taskId: "task-1",
+      newStart: new Date("2026-10-01T20:00:00.000Z"),
+    };
+    expect(toConfirmChangeRow(change)).toEqual({
+      ref: "t1",
+      task_id: "task-1",
+      type: "move",
+      new_start: "2026-10-01T20:00:00.000Z",
+    });
+  });
+
+  it("an unschedule carries no time field at all", () => {
+    const change: ConfirmationChange = { kind: "unschedule", ref: "t2", taskId: "task-2" };
+    const row = toConfirmChangeRow(change);
+    expect(row).toEqual({ ref: "t2", task_id: "task-2", type: "unschedule" });
+    expect(row).not.toHaveProperty("new_start");
+  });
+});
+
+describe("confirmAiProposal", () => {
+  const move: ConfirmationChange = {
+    kind: "move",
+    ref: "t1",
+    taskId: "task-1",
+    newStart: new Date("2026-10-01T20:00:00.000Z"),
+  };
+
+  it("sends the day, base revision, and snake_case changes, and returns the new revision", async () => {
+    const rpc = vi.fn(async () => ({ data: 4, error: null }));
+    const supabase = { rpc } as never;
+    await expect(confirmAiProposal(supabase, "day-1", 3, [move])).resolves.toBe(4);
+    expect(rpc).toHaveBeenCalledWith("confirm_ai_proposal", {
+      p_day_id: "day-1",
+      p_base_revision: 3,
+      p_changes: [
+        { ref: "t1", task_id: "task-1", type: "move", new_start: "2026-10-01T20:00:00.000Z" },
+      ],
+    });
+  });
+
+  it.each([
+    ["40001", "stale_revision"],
+    ["P0002", "task_ineligible"],
+    ["23P01", "conflict"],
+    ["22023", "invalid_proposal"],
+  ] as const)("maps SQLSTATE %s to AiConfirmationError(%s)", async (code, reason) => {
+    const supabase = fakeSupabase({ data: null, error: { code, message: "boom" } });
+    const error = await confirmAiProposal(supabase, "day-1", 3, [move]).then(
+      () => null,
+      (e: unknown) => e,
+    );
+    expect(error).toBeInstanceOf(AiConfirmationError);
+    expect((error as AiConfirmationError).reason).toBe(reason);
+  });
+
+  it("wraps an unrecognized database error without leaking it", async () => {
+    const supabase = fakeSupabase({
+      data: null,
+      error: { code: "XX000", message: "secret detail" },
+    });
+    await expect(confirmAiProposal(supabase, "day-1", 3, [move])).rejects.toBeInstanceOf(
+      ExternalServiceError,
+    );
   });
 });

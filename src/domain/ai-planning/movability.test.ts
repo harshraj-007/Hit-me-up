@@ -52,6 +52,8 @@ describe("the deterministic planner's rule is untouched", () => {
     );
     const body = sql.slice(sql.indexOf("function public.apply_replan"));
     expect(body).toMatch(/and source = 'planner'/);
-    expect(fs.readdirSync(dir)).toHaveLength(6); // no new migration
+    // 6 from Phase 4/4.1/4.1b, plus Phase 5.3's confirm_ai_proposal (a new, separate function —
+    // apply_replan() itself is not touched by that migration).
+    expect(fs.readdirSync(dir)).toHaveLength(7);
   });
 });

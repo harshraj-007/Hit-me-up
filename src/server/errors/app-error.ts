@@ -77,3 +77,34 @@ export class InternalError extends AppError {
     super(init.message ?? "Something went wrong.", { cause: init.cause });
   }
 }
+
+/**
+ * A human-confirmed AI proposal was rejected by the database's own re-validation
+ * (`confirm_ai_proposal`, Phase 5.3) — never by trusting the proposal that was shown to the
+ * user. `reason` is a small, stable discriminator for the caller (mirrors `AiError.reason` in
+ * `server/ai/errors.ts`), deliberately coarser than the RPC's own SQLSTATEs: a missing task, a
+ * foreign one, a locked one and a resolved one are all `task_ineligible`, so a guessed or
+ * copied task id is indistinguishable from one that never existed — nothing about another
+ * user's data is ever revealed. See the migration for the full SQLSTATE → reason mapping.
+ */
+export type AiConfirmationFailureReason =
+  "stale_revision" | "task_ineligible" | "conflict" | "invalid_proposal";
+
+const AI_CONFIRMATION_MESSAGES: Record<AiConfirmationFailureReason, string> = {
+  stale_revision:
+    "Your schedule changed since this proposal was generated. Please review a fresh one.",
+  task_ineligible: "One or more tasks in this proposal are no longer available to change.",
+  conflict: "Applying these changes would create a scheduling conflict.",
+  invalid_proposal: "This proposal couldn't be applied.",
+};
+
+export class AiConfirmationError extends AppError {
+  readonly code = "VALIDATION_ERROR";
+  readonly status = 409;
+  readonly reason: AiConfirmationFailureReason;
+
+  constructor(reason: AiConfirmationFailureReason, init: AppErrorInit = {}) {
+    super(init.message ?? AI_CONFIRMATION_MESSAGES[reason], { cause: init.cause });
+    this.reason = reason;
+  }
+}

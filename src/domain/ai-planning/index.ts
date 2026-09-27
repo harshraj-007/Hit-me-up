@@ -8,3 +8,4 @@ export {
   parsedFromProposal,
   type ValidateProposalInput,
 } from "./validate-proposal";
+export { toConfirmationChanges, type ConfirmationChange } from "./confirmation";

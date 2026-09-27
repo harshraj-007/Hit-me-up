@@ -376,7 +376,36 @@ verified session → UserIntent (Zod, horizon-checked, server-stamped `submitted
 - **Revision before tasks.** `baseRevision` is read _before_ the tasks, so a plan change between the two reads makes the tasks newer than `baseRevision` and a future confirmation compares it as stale, never the reverse.
 - **Second line behind RLS.** Rows that are not the caller's, or not from the expected day, are dropped before the context is built.
 - **Errors.** Unauthenticated (`AuthenticationError`), invalid intent or no day (`ValidationError`), and provider failures (`AiError`: unavailable, timeout, rate limited, provider error, malformed response) are thrown; a proposal the validator refuses is a `ValidationResult`, not an error.
-- **Manual replan is unchanged:** `apply_replan()`, planner tasks only. **AI proposals:** the pipeline above. **Not built:** proposal storage, human confirmation, and the dedicated AI confirmation/apply RPC. There is no UI or Server Action for this service yet.
+- **Manual replan is unchanged:** `apply_replan()`, planner tasks only. **AI proposals:** the pipeline above, now followed by human-confirmed apply (Phase 5.3, below). **Not built:** proposal storage and a UI/Server Action for either service.
+
+#### Phase 5.3: human-confirmed AI proposal → atomic SQL apply
+
+Human confirmation is the boundary between AI reasoning and database mutation — the AI is never given mutation privilege, and a Phase 5.2 `ValidationResult` is never treated as authorization. `confirmAiProposal(rawInput)` in `src/server/services/ai-confirmation.ts` sends a confirmed proposal through exactly one call to the new `confirm_ai_proposal` SQL function, which independently re-derives everything security-relevant from the CURRENT database state:
+
+```
+verified session → Zod (planningDate, baseRevision, ≤20 changes; taskId is a UUID, never
+  trusted as authorization) → the day, resolved from planningDate (read-only, never created)
+→ confirm_ai_proposal(day_id, base_revision, changes)   [SECURITY DEFINER, one transaction]
+     re-checks: auth.uid() ownership on the TASK ROW itself · day_id = this planning day
+       (excludes spillover structurally, not as a special case) · unresolved · unlocked ·
+       not fixed · not in progress — the Phase 5.2 AI-movability rule, reimplemented in SQL
+     derives: a move's end from the row's CURRENT stored duration (no end/duration parameter
+       exists to trust) · re-checks the base revision · re-checks the resulting schedule for
+       conflicts, including the previous day's spillover into this one
+     writes (only if everything holds): every task update + one 'ai' task_history row per
+       task (event 'rescheduled') + exactly one 'ai' plan_revisions row — all atomically;
+       any failure aborts the whole call, so nothing is ever partially applied
+→ re-read tasks, return the new revision number
+```
+
+- **Ref vs task_id.** A proposal's alias (`t1`, `t2`, …) is carried through only for display/audit; it is never resolved back to a task at confirmation time. Rebuilding the alias assignment fresh would be unsound — a task created or resolved between proposal generation and confirmation shifts every later alias with no error and no revision bump. `taskId` (what the trusted server itself resolved during Phase 5.2 generation, `ValidatedChange.taskId`) is the real identifier instead — the same shape `reschedule_task()` already accepts — and the database still independently re-verifies ownership and full current eligibility for it before touching it. See the migration header for the complete reasoning.
+- **`source` is preserved.** The UPDATE never sets `tasks.source`; a user-created task stays `user` and a planner task stays `planner` — there is no branch that could convert one into the other. `task_history.source` and `plan_revisions.source` gained a third value, `'ai'`, specifically so a human-confirmed AI change is distinguishable from a manual `'user'` edit or the deterministic `'system'` planner (an additive, widened CHECK constraint — no new column, no new table).
+- **Duration is preserved.** A move carries only `newStart`; there is no `newEnd` and no duration field at any layer (Zod, the RPC's parameter list, or its accepted JSON keys), so it cannot be smuggled in — this is structural, not merely checked.
+- **Locking.** Both a confirmed move and a confirmed unschedule set `schedule_locked = true`, the same outcome `reschedule_task()` already produces for a real move: a human explicitly approved this placement, so the next automatic replan (`apply_replan()`, still planner-tasks-only and untouched) must not silently undo it.
+- **Errors.** `AiConfirmationError` (`stale_revision` · `task_ineligible` · `conflict` · `invalid_proposal`) mirrors `AiError`'s `.reason` pattern from Phase 5.1; a missing, foreign, resolved, locked, fixed or in-progress task all surface as the same `task_ineligible`, deliberately — no cross-user existence is ever revealed. A malformed request is a `ValidationError`/`ZodError` before any database call.
+- **Concurrency.** `base_revision` is checked once, atomically, alongside the per-row eligibility re-check — a real, single-session equivalent of "the schedule advanced between generation and confirmation" is exercised in the scratch SQL suite (see below); a true two-connection race was out of scope for that harness.
+- **Not built:** proposal storage, and any UI or Server Action for this service.
+- **Verification:** the RPC was exercised in a scratch embedded Postgres (kept outside the repo, like the Phase 4/4.1 scratch suites) covering ownership, alias/ref-vs-taskId resolution, stale revision, every ineligibility case, malformed/duplicate/oversized proposals, conflicts, atomicity (a valid change alongside an ineligible one applies neither), the concurrency equivalent above, direct-write lockdown, and that `apply_replan()`/`isAutoMovable()` are unchanged — plus a dozen SQL mutation-kill checks (removing the ownership check, the revision check, the lock/resolved/conflict/duplicate checks, trusting a supplied end time, allowing a source conversion, incrementing the revision per task, skipping history, and removing atomicity), each of which the suite caught.
 
 ### Timezone strategy
 

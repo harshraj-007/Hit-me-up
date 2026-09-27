@@ -1,5 +1,11 @@
 import "server-only";
-import { ExternalServiceError, NotFoundError, ValidationError } from "@/server/errors";
+import {
+  AiConfirmationError,
+  ExternalServiceError,
+  NotFoundError,
+  ValidationError,
+} from "@/server/errors";
+import type { ConfirmationChange } from "@/domain/ai-planning";
 import type { ScheduleChange } from "@/domain/scheduling";
 import type { Task, TaskKind, TaskPriority, TaskSource, TaskStatus } from "@/domain/tasks";
 import type { SupabaseServerClient } from "../supabase-server";
@@ -15,6 +21,9 @@ const INVALID_PARAMETER = "22023";
 /** `serialization_failure` — apply_replan() raises it when a task changed after the replan
  *  was computed from a now-stale read. */
 const STALE_WRITE = "40001";
+/** `exclusion_violation` — confirm_ai_proposal() raises it when the resulting schedule
+ *  conflicts. See supabase/migrations/20260928090000_phase53_confirm_ai_proposal.sql. */
+const SCHEDULE_CONFLICT = "23P01";
 
 function mapTask(row: TaskRow): Task {
   return {
@@ -219,6 +228,58 @@ export async function applyReplan(
     if (error.code === NO_DATA_FOUND) {
       throw new NotFoundError({ message: "Day not found.", cause: error });
     }
+    throw new ExternalServiceError("supabase", { cause: error });
+  }
+  return data;
+}
+
+/** Wire shape of one element of confirm_ai_proposal()'s `p_changes` (snake_case, ISO strings).
+ *  `new_start` is present only for a `move` — never an end time, never a duration. */
+export interface ConfirmChangeRow {
+  ref: string;
+  task_id: string;
+  type: "move" | "unschedule";
+  new_start?: string;
+}
+
+export function toConfirmChangeRow(change: ConfirmationChange): ConfirmChangeRow {
+  return change.kind === "move"
+    ? {
+        ref: change.ref,
+        task_id: change.taskId,
+        type: "move",
+        new_start: change.newStart.toISOString(),
+      }
+    : { ref: change.ref, task_id: change.taskId, type: "unschedule" };
+}
+
+/**
+ * Applies a human-confirmed AI proposal atomically (see confirm_ai_proposal()): the database
+ * independently re-verifies ownership, current eligibility, the window, the base revision and
+ * the resulting conflicts before writing anything — the ValidationResult the caller already
+ * computed is not trusted here. Returns the new revision number. Every failure aborts the
+ * entire call; nothing is ever partially applied.
+ */
+export async function confirmAiProposal(
+  supabase: SupabaseServerClient,
+  dayId: string,
+  baseRevision: number,
+  changes: readonly ConfirmationChange[],
+): Promise<number> {
+  const { data, error } = await supabase.rpc("confirm_ai_proposal", {
+    p_day_id: dayId,
+    p_base_revision: baseRevision,
+    p_changes: changes.map(toConfirmChangeRow),
+  });
+  if (error) {
+    if (error.code === STALE_WRITE)
+      throw new AiConfirmationError("stale_revision", { cause: error });
+    if (error.code === NO_DATA_FOUND)
+      throw new AiConfirmationError("task_ineligible", { cause: error });
+    if (error.code === SCHEDULE_CONFLICT)
+      throw new AiConfirmationError("conflict", { cause: error });
+    if (error.code === INVALID_PARAMETER)
+      throw new AiConfirmationError("invalid_proposal", { cause: error });
     throw new ExternalServiceError("supabase", { cause: error });
   }
   return data;
