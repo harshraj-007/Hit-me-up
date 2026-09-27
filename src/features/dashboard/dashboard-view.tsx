@@ -1,7 +1,7 @@
 "use client";
 
 import { useMemo, useRef, useState } from "react";
-import { CalendarClock, Plus } from "lucide-react";
+import { CalendarClock, Plus, Sparkles } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { useToast } from "@/components/ui/toast-provider";
 import { useEntrance } from "@/lib/motion";
@@ -16,6 +16,7 @@ import { DashboardHeader } from "./dashboard-header";
 import { DayNav } from "./day-nav";
 import { toDashboardTask } from "./map-task";
 import { RescheduleDialog } from "./reschedule-dialog";
+import { AiPlanDialog } from "./ai-planning/ai-plan-dialog";
 import { computeRemainingMinutes } from "./summary";
 import { TodayTimeline, type TimelineHandle } from "./today-timeline";
 import { useNow } from "./use-now";
@@ -69,6 +70,7 @@ export function DashboardView({
   const [dayExists, setDayExists] = useState(dayId !== null);
   const [briefingText, setBriefingText] = useState(initialBriefingText);
   const [addOpen, setAddOpen] = useState(false);
+  const [aiOpen, setAiOpen] = useState(false);
   const [reschedulingId, setReschedulingId] = useState<string | null>(null);
   const [pendingTaskId, setPendingTaskId] = useState<string | null>(null);
   const [isReplanning, setIsReplanning] = useState(false);
@@ -182,6 +184,13 @@ export function DashboardView({
     toast({ title: "Rescheduled", description: task.title, tone: "success" });
   }
 
+  /** The AI dialog itself owns confirmation (Apply) and the success toast; this only merges
+   *  the re-read tasks it returns, the same way `handleReplan` merges apply_replan's. */
+  function handleAiApplied(outcome: { tasks: Task[] }) {
+    captureLayout();
+    setTasks(outcome.tasks);
+  }
+
   async function handleReplan() {
     if (busy) return;
     setIsReplanning(true);
@@ -285,6 +294,15 @@ export function DashboardView({
             <Plus aria-hidden className="size-4" />
             Add task
           </Button>
+          <Button
+            size="sm"
+            variant="secondary"
+            onClick={() => setAiOpen(true)}
+            disabled={!dayExists}
+          >
+            <Sparkles aria-hidden className="size-4" />
+            Ask AI
+          </Button>
         </div>
       </div>
       <TodayTimeline
@@ -357,6 +375,13 @@ export function DashboardView({
           onRescheduled={handleRescheduled}
         />
       ) : null}
+      <AiPlanDialog
+        open={aiOpen}
+        onOpenChange={setAiOpen}
+        planningDate={localDate}
+        timezone={timezone}
+        onApplied={handleAiApplied}
+      />
     </div>
   );
 }

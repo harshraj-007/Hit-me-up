@@ -46,4 +46,19 @@ describe("redact", () => {
     expect(out.provider).toBe("anthropic");
     expect(out.latencyMs).toBe(12);
   });
+
+  it("masks a voice transcript and audio-related fields by key, wherever they appear", () => {
+    const out = redact({
+      transcript: "move gym after 8pm",
+      transcriptText: "move gym after 8pm",
+      audioBlob: "base64...",
+      audioDurationMs: 4200,
+      voice: { transcript: "nested transcript" },
+    }) as Record<string, unknown>;
+    expect(out.transcript).toBe("[REDACTED]");
+    expect(out.transcriptText).toBe("[REDACTED]");
+    expect(out.audioBlob).toBe("[REDACTED]");
+    expect(out.audioDurationMs).toBe("[REDACTED]"); // "audio" alone is enough to mask the key
+    expect((out.voice as Record<string, unknown>).transcript).toBe("[REDACTED]");
+  });
 });

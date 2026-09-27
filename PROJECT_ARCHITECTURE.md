@@ -404,8 +404,31 @@ verified session → Zod (planningDate, baseRevision, ≤20 changes; taskId is a
 - **Locking.** Both a confirmed move and a confirmed unschedule set `schedule_locked = true`, the same outcome `reschedule_task()` already produces for a real move: a human explicitly approved this placement, so the next automatic replan (`apply_replan()`, still planner-tasks-only and untouched) must not silently undo it.
 - **Errors.** `AiConfirmationError` (`stale_revision` · `task_ineligible` · `conflict` · `invalid_proposal`) mirrors `AiError`'s `.reason` pattern from Phase 5.1; a missing, foreign, resolved, locked, fixed or in-progress task all surface as the same `task_ineligible`, deliberately — no cross-user existence is ever revealed. A malformed request is a `ValidationError`/`ZodError` before any database call.
 - **Concurrency.** `base_revision` is checked once, atomically, alongside the per-row eligibility re-check — a real, single-session equivalent of "the schedule advanced between generation and confirmation" is exercised in the scratch SQL suite (see below); a true two-connection race was out of scope for that harness.
-- **Not built:** proposal storage, and any UI or Server Action for this service.
+- **Not built (as of 5.3):** proposal storage. A UI and Server Actions were added in Phase 5.4, below.
 - **Verification:** the RPC was exercised in a scratch embedded Postgres (kept outside the repo, like the Phase 4/4.1 scratch suites) covering ownership, alias/ref-vs-taskId resolution, stale revision, every ineligibility case, malformed/duplicate/oversized proposals, conflicts, atomicity (a valid change alongside an ineligible one applies neither), the concurrency equivalent above, direct-write lockdown, and that `apply_replan()`/`isAutoMovable()` are unchanged — plus a dozen SQL mutation-kill checks (removing the ownership check, the revision check, the lock/resolved/conflict/duplicate checks, trusting a supplied end time, allowing a source conversion, incrementing the revision per task, skipping history, and removing atomicity), each of which the suite caught.
+
+#### Phase 5.4: voice as an input modality — and the first AI UI
+
+Voice is an input modality, never a mutation authority. It produces text for a human to review, exactly like typing — nothing downstream of that review step knows or cares which one produced it. The canonical flow:
+
+```
+voice → transcript (live, in the browser) → user reviews/edits it
+     → UserIntent(source="voice")                      ── identical to typed input from here on
+     → generateAiProposal()   (Phase 5.2, unchanged)
+     → deterministic validation (Phase 5.0, unchanged)
+     → human reviews the proposal, presses Apply
+     → confirmAiProposal()   (Phase 5.3, unchanged)
+     → the existing atomic confirmation RPC
+```
+
+- **Transcription mechanism: the browser's own `SpeechRecognition`** (`src/lib/voice/speech-recognition.ts`), not a server-side provider. This was a deliberate choice, not the absence of one: it needs no new dependency, no server route, and — the significant part — no credential of any kind, because there is nothing to keep secret. Audio never becomes a value this codebase holds, sends, or persists; the browser transcribes it internally and this module only ever sees the resulting text. The trade-off, disclosed here rather than hidden: browser support varies, and on Chromium-based browsers the engine itself is cloud-based (Google's), outside this app's control — the same way it already is for anyone using that browser's built-in dictation anywhere else. An unsupported browser disables the voice button with an explanation; typing always works.
+- **Raw audio never reaches Anthropic**, or anywhere at all: `src/server/ai/*` (the planning provider layer) has no knowledge of voice, microphones, or the browser, and the voice module has no audio `Blob`, `MediaRecorder`, or upload of any kind — both are structurally enforced by `src/lib/voice/boundaries.test.ts`, which scans the source rather than merely asserting behavior.
+- **Mandatory transcript review.** Recording never submits anything on its own. `src/features/dashboard/ai-planning/flow-state.ts` is a pure state machine — `idle → recording → transcribing → transcript_review → generating → proposal_ready → confirming → applied`, with `error`/`cancel` reachable throughout — and `submit`/`confirm` are the only two transitions that call a Server Action, both requiring an explicit prior state (`transcript_review`, `proposal_ready`) that only a user action reaches.
+- **Stale results can't land.** Every state carries an `epoch`; starting a new recording, cancelling, or resetting mints a new one, and an event tagged with any other epoch is dropped by the reducer. A transcription or a proposal that resolves after the user cancelled, or after a newer recording started, is simply ignored — never merged into current state, never silently applied.
+- **The same pipeline, not a second one.** `use-ai-plan-flow.ts` calls the exact `generateAiProposalAction`/`confirmAiProposalAction` Server Actions (new in 5.4, but thin wrappers with no logic of their own — see `src/features/dashboard/ai-planning/actions.ts`) regardless of `source`; there is no voice-specific proposal schema, movability rule, or mutation path. A voice-sourced request is rejected by exactly the same deterministic rules as typed text (duration changes, locked/resolved/in-progress tasks, conflicts, …), because validation never looks at `source` at all.
+- **Privacy/logging.** `transcript` and `audio` were added to the structured logger's key-based redaction (`src/server/logging/redact.ts`), alongside the existing `prompt`/`completion` from Phase 5.1. Nothing in the voice or AI-planning UI logs at all in normal operation; this is defense in depth for the logger itself.
+- **No migration, no persistence.** Nothing about audio, transcripts, or voice sessions is stored; the flow is entirely in-memory until the user explicitly applies a proposal, at which point only the resulting task changes are written — the same as if they had typed the request.
+- **The AI proposal review UI itself is new in this phase** (`src/features/dashboard/ai-planning/ai-plan-dialog.tsx`, opened from a "Ask AI" button next to "Add task"): neither a UI nor a Server Action for Phase 5.2/5.3 existed before 5.4, so this phase built the minimal shared version both input modes need, rather than voice having nowhere to go.
 
 ### Timezone strategy
 

@@ -541,3 +541,59 @@ describe("read-only", () => {
     // (DB_TOUCH throws if the service used the Supabase client itself.)
   });
 });
+
+// Phase 5.4: voice is only ever a different value of `source` on the SAME UserIntent — nothing
+// downstream of parsing knows or cares where the text came from. These exist to demonstrate
+// that directly, rather than leaving it implied by "the schema doesn't branch on source".
+describe("voice input (Phase 5.4) reuses this exact pipeline", () => {
+  it("a voice-sourced request is validated, contextualized and proposed on identically to typed", async () => {
+    own = [makeTask({ title: "Gym", source: "user", start: at(17), end: at(18) })];
+    const { result, generator } = await run(
+      request({ source: "voice", text: "move gym to 8pm" }),
+      (c: PlanningContext) => proposal([move(refOf(c, "Gym"), "2026-10-01T20:00")]),
+    );
+    expect(result.validation.status).toBe("valid");
+    // the provider request is built purely from PlanningContext + intent.text — nothing marks
+    // this call as voice-originated in any provider-visible way beyond the text itself
+    expect(generator.calls[0]!.intent.source).toBe("voice");
+    expect(generator.calls[0]!.intent.text).toBe("move gym to 8pm");
+  });
+
+  it("no audio, blob, or media-related value ever reaches the provider call for voice input", async () => {
+    own = [makeTask({ title: "Gym", start: at(17), end: at(18) })];
+    const { generator } = await run(request({ source: "voice" }), proposal([]));
+    const wire = JSON.stringify(generator.calls[0]);
+    for (const forbidden of ["audio", "blob", "base64", "mediaRecorder", "webm", "wav"]) {
+      expect(wire.toLowerCase()).not.toContain(forbidden.toLowerCase());
+    }
+  });
+
+  it("a voice transcript is rejected by the SAME deterministic rules as typed text: duration change, locked task", async () => {
+    own = [
+      makeTask({ title: "Gym", start: at(17), end: at(18, 30) }), // 90 min
+      makeTask({ title: "Locked", scheduleLocked: true, start: at(12), end: at(13) }),
+    ];
+    const { result } = await run(
+      request({ source: "voice", text: "give gym an extra hour and move Locked" }),
+      (c: PlanningContext) =>
+        proposal([
+          { ...move(refOf(c, "Gym"), "2026-10-01T20:00"), newEnd: "2026-10-01T23:00" },
+          move(refOf(c, "Locked"), "2026-10-01T15:00"),
+        ]),
+    );
+    expect(result.validation.accepted).toEqual([]);
+    expect(result.validation.rejected.map((r) => r.code).sort()).toEqual(
+      ["duration_changed", "locked_task"].sort(),
+    );
+  });
+
+  it("voice input alone never mutates anything — generateAiProposal is read-only regardless of source", async () => {
+    own = [makeTask({ title: "Gym", start: at(17), end: at(18) })];
+    await run(request({ source: "voice" }), (c: PlanningContext) =>
+      proposal([move(refOf(c, "Gym"), "2026-10-01T20:00")]),
+    );
+    for (const fn of [taskRepo.rescheduleTask, taskRepo.applyReplan, taskRepo.createTask]) {
+      expect(fn).not.toHaveBeenCalled();
+    }
+  });
+});

@@ -1,5 +1,5 @@
 const SENSITIVE_KEY =
-  /(pass(word)?|secret|token|api[-_]?key|authorization|cookie|session|credential|service[-_]?role|jwt|email|phone|brain[-_]?dump|content|body|prompt|completion)/i;
+  /(pass(word)?|secret|token|api[-_]?key|authorization|cookie|session|credential|service[-_]?role|jwt|email|phone|brain[-_]?dump|content|body|prompt|completion|transcript|audio)/i;
 
 const SENSITIVE_VALUE: [RegExp, string][] = [
   [/sk-ant-[A-Za-z0-9_-]+/g, "[REDACTED]"],
