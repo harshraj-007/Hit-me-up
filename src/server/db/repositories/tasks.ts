@@ -1,14 +1,20 @@
 import "server-only";
-import { ExternalServiceError, NotFoundError } from "@/server/errors";
+import { ExternalServiceError, NotFoundError, ValidationError } from "@/server/errors";
+import type { ScheduleChange } from "@/domain/scheduling";
 import type { Task, TaskKind, TaskPriority, TaskSource, TaskStatus } from "@/domain/tasks";
 import type { SupabaseServerClient } from "../supabase-server";
 import type { Database } from "../database.types";
 
 type TaskRow = Database["public"]["Tables"]["tasks"]["Row"];
 
-/** PL/pgSQL "no_data_found" — change_task_status() raises this when the target row didn't
- *  match (missing, not owned, or no longer "upcoming"). See the migration for the SQL. */
+/** PL/pgSQL "no_data_found" — the task RPCs raise this when the target row didn't match
+ *  (missing, not owned, or no longer "upcoming"). See the migrations for the SQL. */
 const NO_DATA_FOUND = "P0002";
+/** `invalid_parameter_value` — a window the database itself refuses (e.g. outside the day). */
+const INVALID_PARAMETER = "22023";
+/** `serialization_failure` — apply_replan() raises it when a task changed after the replan
+ *  was computed from a now-stale read. */
+const STALE_WRITE = "40001";
 
 function mapTask(row: TaskRow): Task {
   return {
@@ -25,6 +31,8 @@ function mapTask(row: TaskRow): Task {
     scheduledEnd: new Date(row.scheduled_end),
     dueAt: row.due_at ? new Date(row.due_at) : null,
     completedAt: row.completed_at ? new Date(row.completed_at) : null,
+    scheduleLocked: row.schedule_locked,
+    unscheduled: row.unscheduled,
     createdAt: new Date(row.created_at),
     updatedAt: new Date(row.updated_at),
   };
@@ -40,6 +48,29 @@ export async function listTasksForDay(
     .eq("day_id", dayId)
     .order("scheduled_start", { ascending: true });
 
+  if (error) throw new ExternalServiceError("supabase", { cause: error });
+  return data.map(mapTask);
+}
+
+/**
+ * Yesterday's unresolved tasks that are still running into `dayStart` — the cross-midnight
+ * "spillover". They keep belonging to their own planning day (`previousDayId`); this only
+ * reads them so the next day can show them and plan around them. Unscheduled tasks hold no
+ * slot and are excluded. One query, by day id, using the existing (day_id, scheduled_start) index.
+ */
+export async function listSpilloverTasks(
+  supabase: SupabaseServerClient,
+  previousDayId: string,
+  dayStart: Date,
+): Promise<Task[]> {
+  const { data, error } = await supabase
+    .from("tasks")
+    .select("*")
+    .eq("day_id", previousDayId)
+    .eq("status", "upcoming")
+    .eq("unscheduled", false)
+    .gt("scheduled_end", dayStart.toISOString())
+    .order("scheduled_start", { ascending: true });
   if (error) throw new ExternalServiceError("supabase", { cause: error });
   return data.map(mapTask);
 }
@@ -85,7 +116,7 @@ export async function createTask(supabase: SupabaseServerClient, input: NewTask)
 export async function changeTaskStatus(
   supabase: SupabaseServerClient,
   taskId: string,
-  newStatus: Extract<TaskStatus, "completed" | "skipped" | "late">,
+  newStatus: Extract<TaskStatus, "completed" | "skipped">,
 ): Promise<Task> {
   const { data, error } = await supabase.rpc("change_task_status", {
     p_task_id: taskId,
@@ -108,4 +139,87 @@ export async function getTaskById(
   const { data, error } = await supabase.from("tasks").select("*").eq("id", taskId).maybeSingle();
   if (error) throw new ExternalServiceError("supabase", { cause: error });
   return data ? mapTask(data) : null;
+}
+
+/** Moves one unresolved task and pins it, atomically with its history row and a "user" plan
+ *  revision (see reschedule_task()). No-op writes (same window) create neither. */
+export async function rescheduleTask(
+  supabase: SupabaseServerClient,
+  taskId: string,
+  start: Date,
+  end: Date,
+): Promise<Task> {
+  const { data, error } = await supabase.rpc("reschedule_task", {
+    p_task_id: taskId,
+    p_start: start.toISOString(),
+    p_end: end.toISOString(),
+  });
+  if (error) {
+    if (error.code === NO_DATA_FOUND) {
+      throw new NotFoundError({ message: "Task not found.", cause: error });
+    }
+    if (error.code === INVALID_PARAMETER) {
+      throw new ValidationError(
+        [{ path: "scheduledStart", message: "That time isn't valid for today." }],
+        {
+          cause: error,
+        },
+      );
+    }
+    throw new ExternalServiceError("supabase", { cause: error });
+  }
+  return mapTask(data);
+}
+
+/** Wire shape of one element of apply_replan()'s `p_changes` (snake_case, ISO strings). */
+export interface ReplanChangeRow {
+  task_id: string;
+  previous_start: string;
+  previous_end: string;
+  previous_unscheduled: boolean;
+  new_start: string;
+  new_end: string;
+  new_unscheduled: boolean;
+}
+
+export function toReplanChangeRow(change: ScheduleChange): ReplanChangeRow {
+  return {
+    task_id: change.taskId,
+    previous_start: change.previousStart.toISOString(),
+    previous_end: change.previousEnd.toISOString(),
+    previous_unscheduled: change.previousUnscheduled,
+    new_start: change.newStart.toISOString(),
+    new_end: change.newEnd.toISOString(),
+    new_unscheduled: change.newUnscheduled,
+  };
+}
+
+/**
+ * Applies a replan atomically (see apply_replan()): every task update, its history row and
+ * exactly one "system" plan revision commit together or not at all. Returns the new revision
+ * number, or null when nothing changed. A task that changed since the replan was computed
+ * makes the whole thing fail with a ValidationError the user can retry.
+ */
+export async function applyReplan(
+  supabase: SupabaseServerClient,
+  dayId: string,
+  changes: readonly ScheduleChange[],
+): Promise<number | null> {
+  const { data, error } = await supabase.rpc("apply_replan", {
+    p_day_id: dayId,
+    p_changes: changes.map(toReplanChangeRow),
+  });
+  if (error) {
+    if (error.code === STALE_WRITE) {
+      throw new ValidationError([], {
+        message: "Your schedule changed while replanning. Please try again.",
+        cause: error,
+      });
+    }
+    if (error.code === NO_DATA_FOUND) {
+      throw new NotFoundError({ message: "Day not found.", cause: error });
+    }
+    throw new ExternalServiceError("supabase", { cause: error });
+  }
+  return data;
 }

@@ -1,11 +1,11 @@
 /**
- * Presentation-level types for the dashboard shell. These describe what a task looks like
- * on screen; they intentionally do not import from `domain/` or `server/` and are not the
- * persisted schema. Once Phase 3 defines the domain model, this file maps to (rather than
- * becomes) it.
+ * Presentation-level types for the dashboard. These describe what a task looks like on
+ * screen; the persisted model lives in `src/domain/tasks`.
  */
+import type { TemporalState } from "@/domain/tasks";
 
-export type TaskStatus = "upcoming" | "current" | "completed" | "late" | "skipped";
+/** What a task looks like right now (derived from the clock + stored data). */
+export type TaskStatus = TemporalState;
 
 export type TaskPriority = "high" | "medium" | "low";
 
@@ -20,13 +20,13 @@ export interface DashboardTask {
   status: TaskStatus;
   priority: TaskPriority;
   kind: TaskKind;
+  /** The user moved this by hand; automatic replanning won't touch it. */
+  locked: boolean;
+  /** The task's own planning day (YYYY-MM-DD) and that day's frozen timezone. A spillover
+   *  task carries the PREVIOUS day's, which can differ from the day on screen. */
+  planningDate: string;
+  timezone: string;
   /** Present only for kind === "deadline". */
   dueAt?: Date;
   note?: string;
-}
-
-export interface DaySummary {
-  completed: number;
-  total: number;
-  remainingMinutes: number;
 }

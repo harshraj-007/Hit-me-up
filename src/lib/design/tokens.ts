@@ -4,7 +4,14 @@
  * matching CSS custom properties in src/app/globals.css).
  */
 import type { TaskPriority, TaskStatus } from "@/features/dashboard/types";
-import { AlertTriangle, Check, CircleDot, SkipForward, type LucideIcon } from "lucide-react";
+import {
+  AlertTriangle,
+  CalendarX,
+  Check,
+  CircleDot,
+  SkipForward,
+  type LucideIcon,
+} from "lucide-react";
 
 export interface StatusStyle {
   label: string;
@@ -39,6 +46,13 @@ export const statusStyles: Record<TaskStatus, StatusStyle> = {
   late: {
     label: "Late",
     icon: AlertTriangle,
+    text: "text-status-late",
+    soft: "bg-status-late-soft",
+    border: "border-status-late",
+  },
+  unscheduled: {
+    label: "Didn\u2019t fit",
+    icon: CalendarX,
     text: "text-status-late",
     soft: "bg-status-late-soft",
     border: "border-status-late",

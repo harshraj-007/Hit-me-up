@@ -4,52 +4,134 @@ vi.mock("@/server/auth/session", () => ({ requireUser: vi.fn() }));
 vi.mock("@/server/db/supabase-server", () => ({
   createSupabaseServerClient: vi.fn(async () => ({})),
 }));
-vi.mock("@/server/db/repositories/plans", () => ({ ensurePlan: vi.fn() }));
-vi.mock("@/server/db/repositories/tasks", () => ({ listTasksForDay: vi.fn() }));
+vi.mock("@/server/db/repositories/tasks", () => ({
+  listTasksForDay: vi.fn(),
+  listSpilloverTasks: vi.fn(),
+}));
 vi.mock("@/server/db/repositories/briefings", () => ({ getLatestBriefing: vi.fn() }));
-vi.mock("./day", () => ({ findCurrentDay: vi.fn() }));
+vi.mock("./day", () => ({ findCurrentDay: vi.fn(), todayLocalDate: vi.fn(), viewDay: vi.fn() }));
 
 import { requireUser } from "@/server/auth/session";
-import { ensurePlan } from "@/server/db/repositories/plans";
-import { listTasksForDay } from "@/server/db/repositories/tasks";
+import { listSpilloverTasks, listTasksForDay } from "@/server/db/repositories/tasks";
 import { getLatestBriefing } from "@/server/db/repositories/briefings";
-import { findCurrentDay } from "./day";
+import { findCurrentDay, todayLocalDate, viewDay } from "./day";
 import { getTodaySnapshot } from "./today";
+
+const TODAY = { id: "day-1", userId: "user-1", localDate: "2026-09-24", timezone: "Asia/Calcutta" };
+const YESTERDAY = {
+  id: "day-0",
+  userId: "user-1",
+  localDate: "2026-09-23",
+  timezone: "Asia/Calcutta",
+};
 
 beforeEach(() => {
   vi.clearAllMocks();
   vi.mocked(requireUser).mockResolvedValue({ id: "user-1", email: null });
+  vi.mocked(todayLocalDate).mockResolvedValue({
+    todayLocal: "2026-09-24",
+    profileTimezone: "Asia/Calcutta",
+  });
+  vi.mocked(findCurrentDay).mockResolvedValue(TODAY);
+  vi.mocked(viewDay).mockResolvedValue(null);
+  vi.mocked(listTasksForDay).mockResolvedValue([]);
+  vi.mocked(listSpilloverTasks).mockResolvedValue([]);
+  vi.mocked(getLatestBriefing).mockResolvedValue(null);
 });
 
 describe("getTodaySnapshot", () => {
-  it("returns needs-timezone and creates/reads nothing further when the timezone is unknown", async () => {
-    vi.mocked(findCurrentDay).mockResolvedValue(null);
-
+  it("returns needs-timezone and reads/creates nothing further when the timezone is unknown", async () => {
+    vi.mocked(todayLocalDate).mockResolvedValue(null);
     await expect(getTodaySnapshot()).resolves.toEqual({ kind: "needs-timezone" });
-
-    expect(ensurePlan).not.toHaveBeenCalled();
+    expect(findCurrentDay).not.toHaveBeenCalled();
     expect(listTasksForDay).not.toHaveBeenCalled();
-    expect(getLatestBriefing).not.toHaveBeenCalled();
   });
 
-  it("returns a ready snapshot for the resolved day once the timezone is known", async () => {
-    vi.mocked(findCurrentDay).mockResolvedValue({
-      id: "day-1",
-      userId: "user-1",
-      localDate: "2026-09-24",
-      timezone: "Asia/Calcutta",
-    });
-    vi.mocked(listTasksForDay).mockResolvedValue([]);
-    vi.mocked(getLatestBriefing).mockResolvedValue(null);
-
+  it("returns today's ready snapshot with the day's own timezone", async () => {
     const snapshot = await getTodaySnapshot();
-
     expect(snapshot).toMatchObject({
       kind: "ready",
+      viewState: "today",
       dayId: "day-1",
       localDate: "2026-09-24",
+      timezone: "Asia/Calcutta",
       tasks: [],
+      spillover: [],
     });
-    expect(ensurePlan).toHaveBeenCalledWith(expect.anything(), "user-1", "day-1");
+    expect(findCurrentDay).toHaveBeenCalledTimes(1);
+  });
+
+  it("treats today's own date the same as no date", async () => {
+    await expect(getTodaySnapshot("2026-09-24")).resolves.toMatchObject({ viewState: "today" });
+  });
+
+  it("loads yesterday's spillover for today, from the previous day's id and today's local start", async () => {
+    vi.mocked(viewDay).mockResolvedValue(YESTERDAY);
+    await getTodaySnapshot();
+    expect(viewDay).toHaveBeenCalledWith(expect.anything(), "user-1", "2026-09-23");
+    expect(listSpilloverTasks).toHaveBeenCalledWith(
+      expect.anything(),
+      "day-0",
+      new Date("2026-09-23T18:30:00Z"),
+    );
+  });
+
+  it("does not look for spillover when there is no previous day row", async () => {
+    await getTodaySnapshot();
+    expect(listSpilloverTasks).not.toHaveBeenCalled();
+  });
+
+  describe("a future date", () => {
+    it("with no day row is an empty read-only view: dayId null, nothing created, no task query", async () => {
+      const snapshot = await getTodaySnapshot("2026-09-26");
+      expect(snapshot).toMatchObject({
+        kind: "ready",
+        viewState: "future",
+        dayId: null,
+        localDate: "2026-09-26",
+        timezone: "Asia/Calcutta", // the profile zone a new day would be created with
+        tasks: [],
+      });
+      expect(findCurrentDay).not.toHaveBeenCalled(); // viewing must never create a day
+      expect(listTasksForDay).not.toHaveBeenCalled();
+    });
+
+    it("with a row uses THAT day's frozen timezone and only its own tasks for the task list", async () => {
+      const friday = {
+        id: "day-5",
+        userId: "user-1",
+        localDate: "2026-09-26",
+        timezone: "Pacific/Auckland",
+      };
+      vi.mocked(viewDay).mockImplementation(async (_c, _u, date) =>
+        date === "2026-09-26" ? friday : null,
+      );
+      const snapshot = await getTodaySnapshot("2026-09-26");
+      expect(snapshot).toMatchObject({
+        viewState: "future",
+        dayId: "day-5",
+        timezone: "Pacific/Auckland",
+      });
+      expect(listTasksForDay).toHaveBeenCalledWith(expect.anything(), "day-5");
+      expect(getLatestBriefing).not.toHaveBeenCalled(); // briefings belong to today
+    });
+  });
+
+  describe("invalid dates go back to today", () => {
+    it.each([
+      ["yesterday", "2026-09-23"],
+      ["today + 366", "2027-09-25"],
+      ["garbage", "not-a-date"],
+      ["an impossible date", "2026-02-30"],
+      ["a timestamp", "2026-09-25T00:00:00Z"],
+    ])("%s", async (_label, date) => {
+      await expect(getTodaySnapshot(date)).resolves.toEqual({ kind: "invalid-date" });
+      expect(findCurrentDay).not.toHaveBeenCalled();
+      expect(listTasksForDay).not.toHaveBeenCalled();
+    });
+
+    it("accepts today + 365, the last plannable date", async () => {
+      await expect(getTodaySnapshot("2027-09-24")).resolves.toMatchObject({ viewState: "future" });
+    });
   });
 });

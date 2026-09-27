@@ -3,10 +3,12 @@
 import { useRef } from "react";
 import clsx from "clsx";
 import {
+  AlertTriangle,
   ArrowLeftRight,
   Check,
   Clock,
   Flag,
+  Lock,
   Pin,
   Repeat,
   SkipForward,
@@ -15,7 +17,7 @@ import {
 import { Badge } from "@/components/ui/badge";
 import { priorityStyles, statusStyles } from "@/lib/design/tokens";
 import { pulseStatusIcon } from "@/lib/motion";
-import { formatDuration, formatRange, minutesBetween } from "@/lib/format/time";
+import { formatDuration, formatWindow, minutesBetween } from "@/lib/format/time";
 import type { DashboardTask, TaskKind } from "./types";
 
 const KIND_ICON: Record<TaskKind, LucideIcon> = {
@@ -38,7 +40,9 @@ export interface TaskItemProps {
   task: DashboardTask;
   onComplete: (id: string) => void;
   onSkip: (id: string) => void;
-  onMarkLate: (id: string) => void;
+  onReschedule: (id: string) => void;
+  /** Overlaps another live task (shown, never auto-resolved for user-owned tasks). */
+  hasConflict?: boolean;
   /** True while this task's own status change is in flight — disables its actions so a
    *  second click can't race the first (see DashboardView's pendingTaskId). */
   isPending?: boolean;
@@ -49,7 +53,8 @@ export function TaskItem({
   task,
   onComplete,
   onSkip,
-  onMarkLate,
+  onReschedule,
+  hasConflict = false,
   isPending = false,
 }: TaskItemProps) {
   const iconRef = useRef<HTMLSpanElement>(null);
@@ -57,7 +62,8 @@ export function TaskItem({
   const priority = priorityStyles[task.priority];
   const KindIcon = KIND_ICON[task.kind];
   const StatusIcon = status.icon;
-  const actionable = task.status === "upcoming" || task.status === "current";
+  // Anything unresolved — including overdue (late) and unscheduled — can still be acted on.
+  const actionable = task.status !== "completed" && task.status !== "skipped";
 
   function runAction(action: (id: string) => void) {
     void pulseStatusIcon(iconRef.current);
@@ -89,7 +95,7 @@ export function TaskItem({
             {task.title}
           </p>
           <p className="shrink-0 text-xs text-muted tabular-nums">
-            {formatRange(task.start, task.end)} ·{" "}
+            {formatWindow(task.start, task.end, task.timezone)} ·{" "}
             {formatDuration(minutesBetween(task.start, task.end))}
           </p>
         </div>
@@ -104,6 +110,18 @@ export function TaskItem({
             <KindIcon aria-hidden className="size-3" />
             {KIND_LABEL[task.kind]}
           </span>
+          {task.locked ? (
+            <span className="inline-flex items-center gap-1 text-xs text-muted">
+              <Lock aria-hidden className="size-3" />
+              Moved by you
+            </span>
+          ) : null}
+          {hasConflict ? (
+            <span className="inline-flex items-center gap-1 text-xs font-medium text-status-late">
+              <AlertTriangle aria-hidden className="size-3" />
+              Overlaps another task
+            </span>
+          ) : null}
         </div>
 
         {task.note ? <p className="mt-1 text-xs text-muted">{task.note}</p> : null}
@@ -131,11 +149,11 @@ export function TaskItem({
             <button
               type="button"
               disabled={isPending}
-              onClick={() => runAction(onMarkLate)}
-              className="inline-flex items-center gap-1 rounded-sm px-1.5 py-1 text-xs font-medium text-status-late transition-colors hover:bg-status-late-soft disabled:pointer-events-none disabled:opacity-40"
+              onClick={() => onReschedule(task.id)}
+              className="inline-flex items-center gap-1 rounded-sm px-1.5 py-1 text-xs font-medium text-muted transition-colors hover:bg-surface-hover hover:text-foreground disabled:pointer-events-none disabled:opacity-40"
             >
               <Clock aria-hidden className="size-3.5" />
-              Mark late
+              Reschedule
             </button>
           </div>
         ) : null}

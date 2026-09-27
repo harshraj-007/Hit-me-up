@@ -17,6 +17,8 @@
 -- user A's rows. Everything runs inside one transaction and is rolled back
 -- at the end, so it never leaves data behind. Prints "RLS ISOLATION OK" on
 -- success; any failed assertion raises and aborts the transaction.
+-- The full Phase 4 privilege matrix (every protected column, anon vs authenticated, RPC
+-- hardening) was additionally exercised in a scratch PostgreSQL, not stored in this repo.
 -- ─────────────────────────────────────────────────────────────────────────
 
 begin;
@@ -92,15 +94,43 @@ begin
   end if;
 end $$;
 
--- A direct UPDATE against user A's task must affect zero rows under RLS.
-update public.tasks
-   set title = 'hijacked by B'
- where user_id = '00000000-0000-0000-0000-0000000000a1';
-
+-- Direct writes to tasks are closed to API roles altogether (Phase 4): not merely filtered by
+-- RLS but refused for lack of privilege (42501). This must hold for B against A's row AND for
+-- any user against their own row, for every protected column.
 do $$
+declare
+  v_refused boolean;
 begin
-  if (select title from public.tasks where user_id = '00000000-0000-0000-0000-0000000000a1') = 'hijacked by B' then
-    raise exception 'RLS FAILED: user B mutated user A''s task';
+  v_refused := false;
+  begin
+    update public.tasks set title = 'hijacked by B'
+     where user_id = '00000000-0000-0000-0000-0000000000a1';
+  exception when sqlstate '42501' then v_refused := true;
+  end;
+  if not v_refused then
+    raise exception 'RLS FAILED: user B could run a direct UPDATE on tasks';
+  end if;
+
+  v_refused := false;
+  begin
+    insert into public.tasks (user_id, day_id, title, source, scheduled_start, scheduled_end)
+    values ('00000000-0000-0000-0000-0000000000b2', '00000000-0000-0000-0000-0000000000d1',
+            'forged', 'planner', now(), now() + interval '1 hour');
+  exception when sqlstate '42501' then v_refused := true;
+  end;
+  if not v_refused then
+    raise exception 'RLS FAILED: a direct INSERT into tasks was allowed';
+  end if;
+
+  v_refused := false;
+  begin
+    insert into public.task_history (task_id, user_id, previous_status, new_status, source)
+    values (current_setting('test.task_a_id')::uuid, '00000000-0000-0000-0000-0000000000b2',
+            'upcoming', 'completed', 'user');
+  exception when sqlstate '42501' then v_refused := true;
+  end;
+  if not v_refused then
+    raise exception 'RLS FAILED: a direct INSERT into task_history was allowed';
   end if;
 end $$;
 
@@ -125,6 +155,45 @@ begin
 
   if v_unexpectedly_succeeded then
     raise exception 'RLS FAILED: user B completed user A''s task via change_task_status()';
+  end if;
+end $$;
+
+-- Phase 4 RPCs: user B must be refused on user A's task and day, and nothing may change.
+-- Same pattern as above — flag an unexpected success, catch ONLY the expected refusal.
+do $$
+declare
+  v_task_a_id uuid := current_setting('test.task_a_id')::uuid;
+  v_result public.tasks;
+  v_unexpectedly_succeeded boolean := false;
+begin
+  begin
+    select * into v_result from public.reschedule_task(v_task_a_id, now(), now() + interval '20 minutes');
+    v_unexpectedly_succeeded := true;
+  exception
+    when sqlstate 'P0002' then
+      null; -- expected: not B's task
+  end;
+  if v_unexpectedly_succeeded then
+    raise exception 'RLS FAILED: user B rescheduled user A''s task via reschedule_task()';
+  end if;
+
+  begin
+    perform public.apply_replan(
+      '00000000-0000-0000-0000-0000000000d1',
+      jsonb_build_array(jsonb_build_object(
+        'task_id', v_task_a_id,
+        'previous_start', now(), 'previous_end', now() + interval '30 minutes',
+        'previous_unscheduled', false,
+        'new_start', now(), 'new_end', now() + interval '30 minutes',
+        'new_unscheduled', true))
+    );
+    v_unexpectedly_succeeded := true;
+  exception
+    when sqlstate 'P0002' then
+      null; -- expected: not B's day
+  end;
+  if v_unexpectedly_succeeded then
+    raise exception 'RLS FAILED: user B replanned user A''s day via apply_replan()';
   end if;
 end $$;
 

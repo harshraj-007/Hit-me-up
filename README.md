@@ -4,7 +4,7 @@ A personal command center for a student's day. Each morning you write a short br
 
 The UI exists to answer one question: **what matters right now, and what should I do next?**
 
-> Status: **Phase 3 complete** — real persistence. Today reads and writes Postgres through Supabase Auth: sign in with a magic link, add a task, mark it complete/skipped/late, and it's there on refresh. No AI planning yet.
+> Status: **Phase 4.1 complete** — Today is a live operating dashboard: a real clock, derived current/late state, complete/skip, duration-preserving manual rescheduling, tasks that cross midnight, planning for any day from today through today + 365, and an explicit, deterministic "Replan" that appends plan revisions. All six migrations are applied to the hosted project and present in `supabase/migrations/`. No AI yet.
 
 ## Prerequisites
 
@@ -23,10 +23,10 @@ supabase link --project-ref <your-project-ref>   # or `supabase start` for a loc
 supabase db push                                  # applies supabase/migrations/*.sql
 ```
 
-That creates every table, RLS policy and the two RPC functions the app relies on
-(`create_task_with_history`, `change_task_status`) — see
+That creates every table, RLS policy and the five RPC functions the app relies on
+(`create_task_with_history`, `change_task_status`, `reschedule_task` and `apply_replan` — the only write path to tasks and their history — and `ensure_day`, the only path that creates a planning day with its plan and first revision) — see
 [PROJECT_ARCHITECTURE.md §16](PROJECT_ARCHITECTURE.md) for the schema, the RLS strategy, and
-why two atomic RPCs exist instead of plain inserts/updates. `supabase/tests/rls_isolation.sql`
+why atomic RPCs exist instead of plain inserts/updates. `supabase/tests/rls_isolation.sql`
 is a from-scratch check that one user can't read or write another's rows. **It has not been
 executed against the live project** (see Known limitations). To run it, start a local stack
 (`supabase start`, needs Docker) and follow the `psql` command in the comment at the top of the
@@ -49,6 +49,9 @@ file — it is a plain SQL script, not a pgTAP test, so `supabase test db` will 
   authenticated email session, and there is deliberately no password login or auth bypass.
 - **Cross-user RLS isolation is not executed against the live project.** Anonymous lockout and
   the signed-in user's own flow were verified live; user-A-versus-user-B isolation was not.
+- **Replanning is report-only on real accounts until the AI phase.** It may move only `source = 'planner'` tasks, and nothing creates those yet; on a user-only day it reports overlaps and changes nothing. The planner itself is fully unit-tested with planner inputs.
+- **The Phase 4 E2E specs are written but skipped** (`tests/e2e/live-today.spec.ts`), for the same real-auth reason as above.
+- **Postgres and Node can disagree on a day's edges in rare cases** (an ambiguous midnight, or tz-rule differences for future dates); the stricter check wins. Details in PROJECT_ARCHITECTURE.md, _Planning days_.
 - Sign-up is open — anyone with an email address can create an account.
 
 ## Architecture overview
@@ -88,8 +91,8 @@ First run of e2e needs `npx playwright install chromium`.
 1. Production foundation: tooling, env contract, CI, error/logging infra, app shell ✅
 2. Design system and the Today dashboard's visual shell (mock data) ✅
 3. Database, domain model, auth and real persistence — mock data removed ✅
-4. AI planning: briefing → Claude → validated, persisted plan
-5. Replanning with plan revisions, built on the Phase 3 plan/revision tables
+4. Live daily operating system: real Now state, derived late, reschedule, deterministic replanning with plan revisions ✅ — and, as Phase 4.1, cross-midnight tasks and future-day planning ✅
+5. AI planning: briefing → Claude → validated, persisted plan (its tasks are the ones replanning may move). "Replan my day" will then offer manual deterministic replanning and an AI-assisted option (most useful with ~4+ unresolved tasks); the AI stays bound by the same scheduling invariants and server-side validation
 6. End-of-day reports and history views
 7. Reminders: Resend email, Twilio WhatsApp, cron processing
 8. Hardening: full e2e coverage (incl. the persisted-Today flow deferred in Phase 3), accessibility audit, rate limiting, deploy runbook

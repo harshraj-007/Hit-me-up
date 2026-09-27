@@ -14,7 +14,11 @@
  * calls `.insert()`/`.update()` on them directly.
  */
 
-type TaskStatusColumn = "upcoming" | "completed" | "skipped" | "late";
+/** What `tasks.status` can hold. "late" is derived from the clock, never stored. */
+type TaskStatusColumn = "upcoming" | "completed" | "skipped";
+/** `task_history` statuses still allow "late": rows recorded under the old model keep it. */
+type HistoryStatusColumn = TaskStatusColumn | "late";
+type HistoryEventColumn = "created" | "status_changed" | "rescheduled" | "replanned";
 type TaskPriorityColumn = "high" | "medium" | "low";
 type TaskKindColumn = "fixed" | "flexible" | "deadline" | "optional" | "recurring";
 type TaskSourceColumn = "user" | "planner";
@@ -92,6 +96,8 @@ export interface Database {
           scheduled_end: string;
           due_at: string | null;
           completed_at: string | null;
+          schedule_locked: boolean;
+          unscheduled: boolean;
           created_at: string;
           updated_at: string;
         };
@@ -123,22 +129,31 @@ export interface Database {
           id: string;
           task_id: string;
           user_id: string;
-          previous_status: TaskStatusColumn | null;
-          new_status: TaskStatusColumn;
+          previous_status: HistoryStatusColumn | null;
+          new_status: HistoryStatusColumn;
           source: HistorySourceColumn;
+          event: HistoryEventColumn;
+          previous_start: string | null;
+          previous_end: string | null;
+          new_start: string | null;
+          new_end: string | null;
+          previous_unscheduled: boolean | null;
+          new_unscheduled: boolean | null;
+          revision_id: string | null;
           changed_at: string;
         };
         // Not used directly — see the tasks table note above.
         Insert: {
           task_id: string;
           user_id: string;
-          previous_status?: TaskStatusColumn | null;
-          new_status: TaskStatusColumn;
+          previous_status?: HistoryStatusColumn | null;
+          new_status: HistoryStatusColumn;
           source?: HistorySourceColumn;
+          event?: HistoryEventColumn;
         };
         Update: {
-          previous_status?: TaskStatusColumn | null;
-          new_status?: TaskStatusColumn;
+          previous_status?: HistoryStatusColumn | null;
+          new_status?: HistoryStatusColumn;
         };
         Relationships: [];
       };
@@ -199,9 +214,33 @@ export interface Database {
       change_task_status: {
         Args: {
           p_task_id: string;
-          p_new_status: "completed" | "skipped" | "late";
+          p_new_status: "completed" | "skipped";
         };
         Returns: Database["public"]["Tables"]["tasks"]["Row"];
+      };
+      ensure_day: {
+        Args: {
+          /** A calendar date (YYYY-MM-DD); omitted or null means "today" in the caller's profile timezone. */
+          p_local_date?: string | null;
+        };
+        Returns: Database["public"]["Tables"]["days"]["Row"];
+      };
+      reschedule_task: {
+        Args: {
+          p_task_id: string;
+          p_start: string;
+          p_end: string;
+        };
+        Returns: Database["public"]["Tables"]["tasks"]["Row"];
+      };
+      apply_replan: {
+        Args: {
+          p_day_id: string;
+          /** JSON array of ReplanChangeRow (see repositories/tasks.ts). */
+          p_changes: unknown;
+        };
+        /** The new plan revision number, or null when nothing changed. */
+        Returns: number | null;
       };
     };
     Enums: Record<string, never>;

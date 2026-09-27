@@ -143,3 +143,36 @@ describe("syncTimezone", () => {
     expect(holder.db.writes).toHaveLength(0);
   });
 });
+
+describe("ensure_day: plan foundation and frozen timezone", () => {
+  it("creates the day together with exactly one plan and one revision 1, and never duplicates them", async () => {
+    await syncTimezone("Asia/Calcutta");
+    await Promise.all([1, 2, 3].map(() => findCurrentDay(holder.db.client, USER)));
+    expect(holder.db.tables.days).toHaveLength(1);
+    expect(holder.db.tables.plans).toHaveLength(1);
+    expect(holder.db.tables.plan_revisions).toEqual([
+      { plan_id: holder.db.tables.plans[0]!.id, revision_number: 1, source: "system" },
+    ]);
+  });
+
+  it("an existing day keeps the timezone it was created with when the profile timezone later changes", async () => {
+    await syncTimezone("Asia/Calcutta");
+    const first = await findCurrentDay(holder.db.client, USER); // 2026-09-24, Calcutta
+    await syncTimezone("America/Los_Angeles"); // still 2026-09-23 there, so a DIFFERENT day…
+    await syncTimezone("Asia/Calcutta");
+    const again = await findCurrentDay(holder.db.client, USER);
+    expect(again?.id).toBe(first?.id);
+    expect(holder.db.tables.days.every((d) => d.timezone === "Asia/Calcutta")).toBe(true);
+  });
+
+  it("never rewrites a stored day's timezone, even when the same calendar date is reached in another zone", async () => {
+    vi.setSystemTime(new Date("2026-09-24T10:00:00Z")); // 24 Sep in both Calcutta and Los Angeles
+    await syncTimezone("Asia/Calcutta");
+    const day = await findCurrentDay(holder.db.client, USER);
+    await syncTimezone("America/Los_Angeles");
+    const same = await findCurrentDay(holder.db.client, USER);
+    expect(same?.id).toBe(day?.id);
+    expect(same?.timezone).toBe("Asia/Calcutta");
+    expect(holder.db.tables.days).toHaveLength(1);
+  });
+});

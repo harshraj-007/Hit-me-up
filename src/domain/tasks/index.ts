@@ -7,4 +7,5 @@ export type {
   TaskHistoryEntry,
 } from "./types";
 export { RESOLVED_STATUSES, isResolved, isValidTransition, checkTransition } from "./transitions";
-export { deriveDisplayStatus, type DisplayTaskStatus } from "./derive-status";
+export { deriveTaskTemporalState, type TemporalState } from "./temporal";
+export { calculateDayProgress, type DayProgress } from "./progress";

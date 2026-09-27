@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("next/cache", () => ({ revalidatePath: vi.fn() }));
 vi.mock("@/server/auth/session", () => ({ requireUserForAction: vi.fn() }));
@@ -17,7 +17,7 @@ import { getTaskById, changeTaskStatus, createTask } from "@/server/db/repositor
 import { AuthenticationError, NotFoundError, ValidationError } from "@/server/errors";
 import type { Task } from "@/domain/tasks";
 import { resolveCurrentDay } from "./day";
-import { createTaskForToday, updateTaskStatusForUser } from "./tasks";
+import { createTaskForDay, updateTaskStatusForUser } from "./tasks";
 
 const VALID_TASK_ID = "11111111-1111-4111-8111-111111111111";
 
@@ -36,6 +36,8 @@ function makeTask(overrides: Partial<Task> = {}): Task {
     scheduledEnd: new Date("2026-09-22T09:30:00Z"),
     dueAt: null,
     completedAt: null,
+    scheduleLocked: false,
+    unscheduled: false,
     createdAt: new Date("2026-09-22T08:00:00Z"),
     updatedAt: new Date("2026-09-22T08:00:00Z"),
     ...overrides,
@@ -77,7 +79,7 @@ describe("updateTaskStatusForUser", () => {
     expect(changeTaskStatus).not.toHaveBeenCalled();
   });
 
-  it.each(["completed", "skipped", "late"] as const)(
+  it.each(["completed", "skipped"] as const)(
     "refuses to move an already-%s task, without calling the database",
     async (resolvedStatus) => {
       vi.mocked(getTaskById).mockResolvedValue(makeTask({ status: resolvedStatus }));
@@ -87,6 +89,23 @@ describe("updateTaskStatusForUser", () => {
       expect(changeTaskStatus).not.toHaveBeenCalled();
     },
   );
+
+  it("rejects 'late' as a target — it is derived from the clock, not a mutation", async () => {
+    await expect(
+      updateTaskStatusForUser({ taskId: VALID_TASK_ID, status: "late" }),
+    ).rejects.toThrow();
+    expect(getTaskById).not.toHaveBeenCalled();
+    expect(changeTaskStatus).not.toHaveBeenCalled();
+  });
+
+  it("lets an overdue (derived-late) task be completed: it is still 'upcoming' in storage", async () => {
+    vi.mocked(getTaskById).mockResolvedValue(
+      makeTask({ status: "upcoming", scheduledEnd: new Date("2000-01-01T00:00:00Z") }),
+    );
+    vi.mocked(changeTaskStatus).mockResolvedValue(makeTask({ status: "completed" }));
+    await updateTaskStatusForUser({ taskId: VALID_TASK_ID, status: "completed" });
+    expect(changeTaskStatus).toHaveBeenCalled();
+  });
 
   it("persists a valid transition and returns exactly what the repository returned", async () => {
     vi.mocked(getTaskById).mockResolvedValue(makeTask({ status: "upcoming" }));
@@ -100,10 +119,16 @@ describe("updateTaskStatusForUser", () => {
   });
 });
 
-describe("createTaskForToday", () => {
+describe("createTaskForDay", () => {
+  beforeEach(() => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-09-22T08:00:00Z")); // inside the mocked day, 2026-09-22 UTC
+  });
+  afterEach(() => vi.useRealTimers());
+
   it("rejects invalid input before resolving the day or touching the database", async () => {
     await expect(
-      createTaskForToday({ title: "", scheduledStart: new Date(), scheduledEnd: new Date() }),
+      createTaskForDay({ title: "", scheduledStart: new Date(), scheduledEnd: new Date() }),
     ).rejects.toThrow();
     expect(resolveCurrentDay).not.toHaveBeenCalled();
     expect(createTask).not.toHaveBeenCalled();
@@ -115,7 +140,7 @@ describe("createTaskForToday", () => {
     const start = new Date("2026-09-22T10:00:00Z");
     const end = new Date("2026-09-22T10:30:00Z");
 
-    const result = await createTaskForToday({
+    const result = await createTaskForDay({
       title: "Write the report",
       scheduledStart: start,
       scheduledEnd: end,

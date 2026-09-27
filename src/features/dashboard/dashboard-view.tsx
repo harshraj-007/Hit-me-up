@@ -1,71 +1,142 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
-import { Plus } from "lucide-react";
+import { useMemo, useRef, useState } from "react";
+import { CalendarClock, Plus } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { useToast } from "@/components/ui/toast-provider";
 import { useEntrance } from "@/lib/motion";
-import type { Task, TaskStatus } from "@/domain/tasks";
-import { updateTaskStatusAction, saveBriefingAction } from "./actions";
+import { addDays, dayBoundsUtc } from "@/domain/days";
+import { calculateDayProgress, type Task, type TaskStatus } from "@/domain/tasks";
+import { detectScheduleConflicts } from "@/domain/scheduling";
+import { formatPlanningDate } from "@/lib/format/time";
+import { replanRemainingDayAction, saveBriefingAction, updateTaskStatusAction } from "./actions";
 import { AddTaskDialog } from "./add-task-dialog";
 import { BriefingPanel } from "./briefing-panel";
 import { DashboardHeader } from "./dashboard-header";
+import { DayNav } from "./day-nav";
 import { toDashboardTask } from "./map-task";
-import { computeDaySummary } from "./summary";
-import { TodayTimeline } from "./today-timeline";
-import type { DashboardTask } from "./types";
-
-const CLOCK_INTERVAL_MS = 60_000;
-
-function byStart(a: DashboardTask, b: DashboardTask) {
-  return a.start.getTime() - b.start.getTime();
-}
+import { RescheduleDialog } from "./reschedule-dialog";
+import { computeRemainingMinutes } from "./summary";
+import { TodayTimeline, type TimelineHandle } from "./today-timeline";
+import { useNow } from "./use-now";
 
 export interface DashboardViewProps {
+  viewState: "today" | "future";
+  /** Null for a future date that has no day row yet (viewing never creates one). */
+  dayId: string | null;
+  localDate: string;
+  todayLocal: string;
+  /** This day's own (frozen) timezone — every time on screen is read in it. */
+  timezone: string;
+  /** What a not-yet-created day would be stamped with. */
+  profileTimezone: string;
+  /** The previous day's date and frozen timezone, for its spillover tasks. */
+  previousDay: { localDate: string; timezone: string } | null;
   initialTasks: Task[];
+  /** Previous-day tasks still running into this day. */
+  initialSpillover: Task[];
   initialBriefingText: string;
-  /** The instant the server snapshot was computed — the starting point for the client's
-   *  own ticking clock, and what "current" was derived against for `initialTasks`. */
+  /** The instant the server snapshot was computed — the shared clock's starting point, so
+   *  server and client render the same thing on first paint. */
   initialNow: Date;
 }
 
 /**
- * Owns Today-page UI state. The data itself lives in Postgres: every mutation here calls a
- * Server Action (src/features/dashboard/actions.ts) and only updates local state from what
- * that action actually persisted — never optimistically, so there's nothing to roll back if
- * it fails (see PROJECT_ARCHITECTURE.md's Phase 3 notes on this choice).
+ * Owns one planning day's UI state. The data lives in Postgres: every mutation calls a Server
+ * Action (src/features/dashboard/actions.ts) and only updates local state from what that
+ * action actually persisted — never optimistically, so there is nothing to roll back.
+ *
+ * The persisted `Task[]` is the state; what each task looks like *right now* (upcoming,
+ * current, late…) is derived from it and the shared clock at render time, in the DAY's
+ * timezone, so the clock moving never writes anything. Progress is computed from this day's own
+ * tasks only; the previous day's spillover is displayed and planned around but never counted.
  */
 export function DashboardView({
+  viewState,
+  dayId,
+  localDate,
+  todayLocal,
+  timezone,
+  profileTimezone,
+  previousDay,
   initialTasks,
+  initialSpillover,
   initialBriefingText,
   initialNow,
 }: DashboardViewProps) {
-  const [tasks, setTasks] = useState<DashboardTask[]>(() =>
-    initialTasks.map((t) => toDashboardTask(t, initialNow)).sort(byStart),
-  );
+  const [tasks, setTasks] = useState<Task[]>(initialTasks);
+  const [spillover, setSpillover] = useState<Task[]>(initialSpillover);
+  const [dayExists, setDayExists] = useState(dayId !== null);
   const [briefingText, setBriefingText] = useState(initialBriefingText);
-  const [now, setNow] = useState(initialNow);
-  const [pendingTaskId, setPendingTaskId] = useState<string | null>(null);
-  const [isSavingBriefing, setIsSavingBriefing] = useState(false);
   const [addOpen, setAddOpen] = useState(false);
+  const [reschedulingId, setReschedulingId] = useState<string | null>(null);
+  const [pendingTaskId, setPendingTaskId] = useState<string | null>(null);
+  const [isReplanning, setIsReplanning] = useState(false);
+  const [isSavingBriefing, setIsSavingBriefing] = useState(false);
   const { toast } = useToast();
-  const scope = useEntrance<HTMLDivElement>({
-    selector: "[data-animate='section']",
-    stagger: 0.08,
-  });
+  const scope = useEntrance<HTMLDivElement>({ selector: "[data-animate='section']" });
+  const timelineRef = useRef<TimelineHandle>(null);
 
-  useEffect(() => {
-    const id = setInterval(() => setNow(new Date()), CLOCK_INTERVAL_MS);
-    return () => clearInterval(id);
-  }, []);
+  const captureLayout = () => timelineRef.current?.captureLayout();
+  const now = useNow(initialNow, captureLayout);
 
-  const summary = useMemo(() => computeDaySummary(tasks, now), [tasks, now]);
+  const bounds = useMemo(() => dayBoundsUtc(localDate, timezone), [localDate, timezone]);
+  const ownDay = useMemo(() => ({ localDate, timezone }), [localDate, timezone]);
+  const prevDay = useMemo(
+    () => previousDay ?? { localDate: addDays(localDate, -1), timezone },
+    [previousDay, localDate, timezone],
+  );
+
+  /** Previous-day tasks that still overlap this day's start: unresolved and scheduled. */
+  const visibleSpillover = useMemo(
+    () =>
+      spillover.filter(
+        (t) => t.status === "upcoming" && !t.unscheduled && t.scheduledEnd > bounds.start,
+      ),
+    [spillover, bounds.start],
+  );
+
+  const dashboardTasks = useMemo(
+    () => tasks.map((t) => toDashboardTask(t, now, ownDay)),
+    [tasks, now, ownDay],
+  );
+  const spilloverTasks = useMemo(
+    () => visibleSpillover.map((t) => toDashboardTask(t, now, prevDay)),
+    [visibleSpillover, now, prevDay],
+  );
+  const progress = useMemo(() => calculateDayProgress(tasks), [tasks]);
+  const remainingMinutes = useMemo(
+    () => computeRemainingMinutes([...dashboardTasks, ...spilloverTasks], now, bounds),
+    [dashboardTasks, spilloverTasks, now, bounds],
+  );
+  const conflictIds = useMemo(
+    () =>
+      new Set(
+        detectScheduleConflicts([...tasks, ...visibleSpillover], now).flatMap((c) => [
+          c.firstTaskId,
+          c.secondTaskId,
+        ]),
+      ),
+    [tasks, visibleSpillover, now],
+  );
+  const rescheduling =
+    [...dashboardTasks, ...spilloverTasks].find((t) => t.id === reschedulingId) ?? null;
+  const busy = pendingTaskId !== null || isReplanning;
+  const isToday = viewState === "today";
+
+  /** Replaces one task with what the server persisted (whichever list holds it), snapshotting
+   *  the layout first so the timeline can animate the reflow. */
+  function replaceTask(updated: Task) {
+    captureLayout();
+    setTasks((prev) => prev.map((t) => (t.id === updated.id ? updated : t)));
+    setSpillover((prev) => prev.map((t) => (t.id === updated.id ? updated : t)));
+  }
 
   async function handleStatusChange(
     taskId: string,
-    status: Extract<TaskStatus, "completed" | "skipped" | "late">,
+    status: Extract<TaskStatus, "completed" | "skipped">,
   ) {
-    if (pendingTaskId) return; // one mutation at a time is plenty for a single-user dashboard
+    if (busy) return; // one mutation at a time is plenty for a single-user dashboard
     setPendingTaskId(taskId);
     try {
       const result = await updateTaskStatusAction({ taskId, status });
@@ -73,27 +144,96 @@ export function DashboardView({
         toast({ title: "Couldn't update task", description: result.error.message, tone: "error" });
         return;
       }
-      const updated = toDashboardTask(result.data, now);
-      setTasks((prev) => prev.map((t) => (t.id === taskId ? updated : t)));
-      const label =
-        status === "completed"
-          ? "Marked complete"
-          : status === "skipped"
-            ? "Skipped"
-            : "Marked late";
+      replaceTask(result.data);
       toast({
-        title: label,
-        description: updated.title,
+        title: status === "completed" ? "Marked complete" : "Skipped",
+        description: result.data.title,
         tone: status === "completed" ? "success" : "neutral",
+      });
+    } catch {
+      toast({
+        title: "Couldn't update task",
+        description: "Check your connection and try again.",
+        tone: "error",
       });
     } finally {
       setPendingTaskId(null);
     }
   }
 
-  function handleCreated(task: Task) {
-    setTasks((prev) => [...prev, toDashboardTask(task, now)].sort(byStart));
-    toast({ title: "Task added", description: task.title, tone: "success" });
+  function handleCreated(task: Task, planningDate: string) {
+    if (planningDate === localDate) {
+      captureLayout();
+      setTasks((prev) => [...prev, task]);
+      setDayExists(true);
+      toast({ title: "Task added", description: task.title, tone: "success" });
+    } else {
+      // Planned for a different day: it belongs to that day's plan, not this one's timeline.
+      toast({
+        title: `Added for ${formatPlanningDate(planningDate)}`,
+        description: task.title,
+        tone: "success",
+      });
+    }
+  }
+
+  function handleRescheduled(task: Task) {
+    replaceTask(task);
+    toast({ title: "Rescheduled", description: task.title, tone: "success" });
+  }
+
+  async function handleReplan() {
+    if (busy) return;
+    setIsReplanning(true);
+    try {
+      // Only a DATE is sent for a future day; today needs no argument (resolved server-side).
+      const result = await replanRemainingDayAction(
+        isToday ? undefined : { planningDate: localDate },
+      );
+      if (!result.ok) {
+        toast({ title: "Couldn't replan", description: result.error.message, tone: "error" });
+        return;
+      }
+      const { tasks: next, changedCount, revisionNumber, unscheduled, conflicts } = result.data;
+      captureLayout();
+      setTasks(next);
+
+      const notes: string[] = [];
+      if (unscheduled.length > 0) {
+        notes.push(
+          `${unscheduled.length} ${unscheduled.length === 1 ? "task" : "tasks"} didn't fit.`,
+        );
+      }
+      if (conflicts.length > 0) {
+        notes.push(
+          `${conflicts.length} ${conflicts.length === 1 ? "overlap needs" : "overlaps need"} your attention.`,
+        );
+      }
+      if (changedCount === 0) {
+        toast({
+          title: "Nothing to change",
+          description: [
+            isToday ? "Your schedule is already up to date." : "This day is already planned.",
+            ...notes,
+          ].join(" "),
+          tone: "neutral",
+        });
+      } else {
+        toast({
+          title: `Rescheduled ${changedCount} ${changedCount === 1 ? "task" : "tasks"}`,
+          description: [`Saved as revision ${revisionNumber}.`, ...notes].join(" "),
+          tone: "success",
+        });
+      }
+    } catch {
+      toast({
+        title: "Couldn't replan",
+        description: "Check your connection and try again.",
+        tone: "error",
+      });
+    } finally {
+      setIsReplanning(false);
+    }
   }
 
   async function handleSaveBriefing(text: string) {
@@ -110,56 +250,113 @@ export function DashboardView({
       }
       setBriefingText(result.data.rawText);
       toast({ title: "Briefing saved", tone: "success" });
+    } catch {
+      toast({
+        title: "Couldn't save briefing",
+        description: "Check your connection and try again.",
+        tone: "error",
+      });
     } finally {
       setIsSavingBriefing(false);
     }
   }
 
+  const timeline = (
+    <section
+      data-animate="section"
+      aria-labelledby="timeline-heading"
+      className="order-last lg:order-1"
+    >
+      <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+        <h2 id="timeline-heading" className="text-sm font-semibold">
+          {isToday ? "Today’s timeline" : `${formatPlanningDate(localDate)} timeline`}
+        </h2>
+        <div className="flex gap-2">
+          <Button
+            size="sm"
+            variant="secondary"
+            onClick={() => void handleReplan()}
+            disabled={busy || !dayExists}
+          >
+            <CalendarClock aria-hidden className="size-4" />
+            {isReplanning ? "Replanning…" : isToday ? "Replan remaining day" : "Replan this day"}
+          </Button>
+          <Button size="sm" variant="secondary" onClick={() => setAddOpen(true)}>
+            <Plus aria-hidden className="size-4" />
+            Add task
+          </Button>
+        </div>
+      </div>
+      <TodayTimeline
+        handleRef={timelineRef}
+        tasks={dashboardTasks}
+        spillover={spilloverTasks}
+        spilloverLabel={`From ${formatPlanningDate(prevDay.localDate)}`}
+        showNow={isToday}
+        timezone={timezone}
+        now={now}
+        conflictIds={conflictIds}
+        pendingTaskId={pendingTaskId}
+        onComplete={(id) => void handleStatusChange(id, "completed")}
+        onSkip={(id) => void handleStatusChange(id, "skipped")}
+        onReschedule={setReschedulingId}
+      />
+    </section>
+  );
+
   return (
     <div ref={scope}>
-      <DashboardHeader now={now} summary={summary} />
+      <DayNav localDate={localDate} todayLocal={todayLocal} />
+      <DashboardHeader
+        now={now}
+        timezone={timezone}
+        viewState={viewState}
+        localDate={localDate}
+        progress={progress}
+        remainingMinutes={remainingMinutes}
+      />
 
       {/*
         Mobile/tablet: a single flex column, briefing above timeline (`order-first`).
         Desktop (lg+): a two-column grid — timeline as the main column, briefing as a
-        sticky side rail — rather than the mobile layout simply stretched wider. Source
-        order stays timeline-then-briefing at every width (the timeline is the primary
-        content), only the visual `order` changes.
+        sticky side rail. Source order stays timeline-then-briefing at every width (the
+        timeline is the primary content), only the visual `order` changes. A future day has no
+        briefing (briefings belong to today), so its timeline takes the full width.
       */}
-      <div className="flex flex-col gap-6 lg:grid lg:grid-cols-[1fr_20rem] lg:items-start xl:grid-cols-[1fr_22rem] xl:gap-8">
-        <section
-          data-animate="section"
-          aria-labelledby="timeline-heading"
-          className="order-last lg:order-1"
-        >
-          <div className="mb-3 flex items-center justify-between">
-            <h2 id="timeline-heading" className="text-sm font-semibold">
-              Today&rsquo;s timeline
-            </h2>
-            <Button size="sm" variant="secondary" onClick={() => setAddOpen(true)}>
-              <Plus aria-hidden className="size-4" />
-              Add task
-            </Button>
+      {isToday ? (
+        <div className="flex flex-col gap-6 lg:grid lg:grid-cols-[1fr_20rem] lg:items-start xl:grid-cols-[1fr_22rem] xl:gap-8">
+          {timeline}
+          <div className="order-first lg:sticky lg:top-6 lg:order-2">
+            <BriefingPanel
+              initialText={briefingText}
+              isSaving={isSavingBriefing}
+              onSave={handleSaveBriefing}
+            />
           </div>
-          <TodayTimeline
-            tasks={tasks}
-            pendingTaskId={pendingTaskId}
-            onComplete={(id) => void handleStatusChange(id, "completed")}
-            onSkip={(id) => void handleStatusChange(id, "skipped")}
-            onMarkLate={(id) => void handleStatusChange(id, "late")}
-          />
-        </section>
-
-        <div className="order-first lg:sticky lg:top-6 lg:order-2">
-          <BriefingPanel
-            initialText={briefingText}
-            isSaving={isSavingBriefing}
-            onSave={handleSaveBriefing}
-          />
         </div>
-      </div>
+      ) : (
+        <div className="flex flex-col gap-6">{timeline}</div>
+      )}
 
-      <AddTaskDialog open={addOpen} onOpenChange={setAddOpen} now={now} onCreated={handleCreated} />
+      <AddTaskDialog
+        open={addOpen}
+        onOpenChange={setAddOpen}
+        now={now}
+        viewDate={localDate}
+        viewTimezone={timezone}
+        profileTimezone={profileTimezone}
+        todayLocal={todayLocal}
+        onCreated={handleCreated}
+      />
+      {rescheduling ? (
+        <RescheduleDialog
+          key={rescheduling.id}
+          task={rescheduling}
+          now={now}
+          onClose={() => setReschedulingId(null)}
+          onRescheduled={handleRescheduled}
+        />
+      ) : null}
     </div>
   );
 }
