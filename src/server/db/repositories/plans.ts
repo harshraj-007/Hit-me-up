@@ -25,3 +25,24 @@ export async function findPlan(
   if (error) throw new ExternalServiceError("supabase", { cause: error });
   return data ? { id: data.id, dayId: data.day_id } : null;
 }
+
+/**
+ * Read-only: the newest revision number of a day's plan, or `null` if the day has no plan or no
+ * revision. Used to stamp an AI planning context with the revision it was computed from.
+ */
+export async function getLatestRevisionNumber(
+  supabase: SupabaseServerClient,
+  dayId: string,
+): Promise<number | null> {
+  const plan = await findPlan(supabase, dayId);
+  if (!plan) return null;
+  const { data, error } = await supabase
+    .from("plan_revisions")
+    .select("revision_number")
+    .eq("plan_id", plan.id)
+    .order("revision_number", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  if (error) throw new ExternalServiceError("supabase", { cause: error });
+  return data ? data.revision_number : null;
+}

@@ -28,4 +28,22 @@ describe("redact", () => {
     a.self = a;
     expect(redact(a)).toEqual({ name: "a", self: "[CIRCULAR]" });
   });
+
+  it("masks provider secrets and model content by key", () => {
+    const out = redact({
+      apiKey: "a",
+      api_key: "b",
+      "x-api-key": "c",
+      authorization: "d",
+      prompt: "e",
+      completion: "f",
+      provider: "anthropic",
+      latencyMs: 12,
+    }) as Record<string, unknown>;
+    for (const key of ["apiKey", "api_key", "x-api-key", "authorization", "prompt", "completion"]) {
+      expect(out[key]).toBe("[REDACTED]");
+    }
+    expect(out.provider).toBe("anthropic");
+    expect(out.latencyMs).toBe(12);
+  });
 });

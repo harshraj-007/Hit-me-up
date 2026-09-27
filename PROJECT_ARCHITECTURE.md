@@ -346,6 +346,38 @@ A task belongs to one **planning day** for life: `tasks.day_id` never changes, a
 
 No AI exists in the product yet and none of it is implemented in Phase 4.1. The intended behavior once an AI integration exists: **"Replan my day"** offers two choices — the existing **manual, deterministic replan** (`replanRemainingDay`) and an **AI-assisted replan**. The AI option is expected to be most useful when there are roughly **four or more unresolved tasks**, where ordering and fitting them by hand is tedious; with fewer, the deterministic replan is usually enough. The AI is an advisor, not an authority: it can only _propose_ a schedule, and the proposal goes through exactly the same path as any other change — parsed, validated against the same domain invariants (never move completed/skipped or user-created or locked tasks, preserve durations, stay inside the planning day and the 24h rule, no overlaps, nothing scheduled in the past, nothing silently dropped) and applied only through the existing server-side write path (`apply_replan`, one revision, atomic, ownership-checked). It must never bypass server-side validation or receive any privilege the deterministic planner lacks. Until then, planner-sourced tasks do not exist, so replan is report-only on real accounts (see Known limitations).
 
+#### Phase 5.0: AI contracts and deterministic validation (pure domain only)
+
+Phase 5.0 adds only the provider-independent foundation, in `src/domain/ai-planning/` (transport schemas in `src/lib/validation/ai-planning.ts`). There is **no AI provider, no API call, no voice, no UI, no table, no RPC change and no persistence**; nothing here can write to the database.
+
+- **AI output is untrusted; domain validation is authoritative.** A model can only produce a `PlanProposal` (`move` or `unschedule` changes, nothing else). Zod (`parseRawProposal`) checks the _shape_ only; `validateProposal` decides everything else, using the server's own snapshot (`PlanningState`), not the model's context.
+- **Alias-based task references.** The model sees `t1`, `t2`, … never database ids, user ids, notes or history. The alias → id map stays server-side; a UUID, a hallucinated alias or an alias from another context is `unknown_ref`. The context is an explicit allow-list (`buildPlanningContext`), covered by leak tests.
+- **Duration is preserved.** A move carries only a new start (local wall time in the day's frozen timezone). The end is derived from the stored duration and the whole window is judged by the existing `validateReschedule` / `validateTaskWindow`. A model-supplied end or duration is rejected (`duration_changed`); `change_duration`, `create`, `delete`, etc. are `unsupported_change`.
+- **Proposal eligibility is its own rule (`isAiMovable`).** Completed/skipped and locked tasks are never changed, and a proposal may only name an unresolved, non-`fixed`, not-in-progress task of the planning day being planned (another day's spillover is an obstacle). This is deliberately **not** `isAutoMovable`, which stays planner-only and belongs to the manual deterministic replan. Conflicts are found with `detectScheduleConflicts` on the schedule the accepted changes would produce; any remaining conflict keeps a result from being `valid`.
+- **No mutation without confirmation (future).** `ValidationResult` is the only thing a later Apply step may consume, and only after explicit user confirmation and a server-side re-check. Typed and voice input will enter through the same `UserIntent` (`source: "typed" | "voice"`); voice is only a way to produce that text.
+- **Persistence is not solved here.** `apply_replan` accepts only `source = 'planner'` tasks and is unchanged, so a validated AI proposal cannot yet be applied to a user-created task. That needs a dedicated, separately reviewed confirmation RPC (a later phase).
+
+#### Phase 5.1: Anthropic provider adapter (provider boundary only)
+
+`src/server/ai/` holds the provider layer: a `ProposalGenerator` port (`port.ts`), the only SDK-aware file (`anthropic.ts`), a static, versioned prompt and tool schema (`prompt.ts`), `AiError` (`errors.ts`), an in-memory fake for tests (`fake.ts`), and `generateParsedProposal` (`generate.ts`), which runs the provider payload through the Zod parser. One request produces one `ParsedProposal`; malformed output is not retried or repaired. The adapter never touches Supabase, repositories or RPCs, decides no movability or duration, and persists nothing; a build-time test (`boundaries.test.ts`) guards those imports. `ANTHROPIC_API_KEY` and `ANTHROPIC_MODEL` are optional and server-only (`getAiConfig`): without them AI reports "unavailable" and nothing else is affected. Prompts and completions are never logged. No proposal service, persistence, confirmation, apply path or UI exists yet, and no real API call is made by the test suite.
+
+#### Phase 5.2: AI proposal generation service (read-only)
+
+`generateAiProposal(rawInput, deps?)` in `src/server/services/ai-planning.ts` is the single entry point:
+
+```
+verified session → UserIntent (Zod, horizon-checked, server-stamped `submittedAt`)
+→ read-only: planning day (viewDay, never ensure_day) → plan revision → own tasks + previous-day spillover
+→ PlanningContext (aliases, allow-list, the day's frozen timezone) → ProposalGenerator port
+→ Zod (parseRawProposal) → validateProposal → ValidationResult
+```
+
+- **Read-only.** No RPC, insert/update, proposal store, revision write or task write; a build-time test scans the service for write verbs and mutating repository functions. Only the new read accessor `getLatestRevisionNumber` (`repositories/plans.ts`) was added.
+- **Revision before tasks.** `baseRevision` is read _before_ the tasks, so a plan change between the two reads makes the tasks newer than `baseRevision` and a future confirmation compares it as stale, never the reverse.
+- **Second line behind RLS.** Rows that are not the caller's, or not from the expected day, are dropped before the context is built.
+- **Errors.** Unauthenticated (`AuthenticationError`), invalid intent or no day (`ValidationError`), and provider failures (`AiError`: unavailable, timeout, rate limited, provider error, malformed response) are thrown; a proposal the validator refuses is a `ValidationResult`, not an error.
+- **Manual replan is unchanged:** `apply_replan()`, planner tasks only. **AI proposals:** the pipeline above. **Not built:** proposal storage, human confirmation, and the dedicated AI confirmation/apply RPC. There is no UI or Server Action for this service yet.
+
 ### Timezone strategy
 
 A user's timezone is **reported by their browser and never guessed by the server.** `profiles.timezone` holds the IANA name, and a `profiles` row exists _only once_ a browser has reported one — so "no profile" means "timezone unknown". `src/domain/days/timezone.ts` resolves "today" as `Intl.DateTimeFormat('en-CA', { timeZone }).format(now)` — never `new Date().toISOString().slice(0, 10)`, which is always UTC's date and wrong for most users for hours of every day. `Intl` is built into Node/browsers, so this needed no new dependency (`@date-fns/tz` was in the Phase 0 plan but wasn't needed).
