@@ -9,7 +9,7 @@ import { describe, expect, it } from "vitest";
  * runtime — this test fails at build time instead. It scans every non-test source file for a
  * `.from("<locked table>")` query chain that contains a write verb.
  */
-const LOCKED = ["days", "plans", "plan_revisions", "tasks", "task_history"];
+const LOCKED = ["days", "plans", "plan_revisions", "tasks", "task_history", "ai_proposals"];
 const WRITE = /\.(insert|upsert|update|delete)\s*\(/;
 const SRC = join(process.cwd(), "src");
 
@@ -76,14 +76,18 @@ describe("no direct writes to the locked tables from application code", () => {
   it("the locked tables are only ever read directly: selects and RPCs", () => {
     const readers = all.flatMap(({ file, source }) =>
       chains(source)
-        .filter((c) => ["days", "plans", "plan_revisions"].includes(c.table))
+        .filter((c) => ["days", "plans", "plan_revisions", "ai_proposals"].includes(c.table))
         .map((c) => `${file}:${c.table}`),
     );
-    expect(readers.sort()).toEqual([
-      "src/server/db/repositories/days.ts:days",
-      "src/server/db/repositories/days.ts:days",
-      "src/server/db/repositories/plans.ts:plan_revisions", // read-only: getLatestRevisionNumber
-      "src/server/db/repositories/plans.ts:plans",
-    ]);
+    expect(readers.sort()).toEqual(
+      [
+        "src/server/db/repositories/days.ts:days",
+        "src/server/db/repositories/days.ts:days",
+        "src/server/db/repositories/plans.ts:plan_revisions", // read-only: getLatestRevisionNumber
+        "src/server/db/repositories/plans.ts:plans",
+        "src/server/db/repositories/ai-proposals.ts:ai_proposals", // findPendingProposal
+        "src/server/db/repositories/ai-proposals.ts:ai_proposals", // getAiProposalById
+      ].sort(),
+    );
   });
 });

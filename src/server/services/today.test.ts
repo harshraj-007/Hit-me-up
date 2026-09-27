@@ -9,11 +9,15 @@ vi.mock("@/server/db/repositories/tasks", () => ({
   listSpilloverTasks: vi.fn(),
 }));
 vi.mock("@/server/db/repositories/briefings", () => ({ getLatestBriefing: vi.fn() }));
+vi.mock("@/server/db/repositories/ai-proposals", () => ({ findPendingProposal: vi.fn() }));
+vi.mock("@/server/db/repositories/plans", () => ({ getLatestRevisionNumber: vi.fn() }));
 vi.mock("./day", () => ({ findCurrentDay: vi.fn(), todayLocalDate: vi.fn(), viewDay: vi.fn() }));
 
 import { requireUser } from "@/server/auth/session";
 import { listSpilloverTasks, listTasksForDay } from "@/server/db/repositories/tasks";
 import { getLatestBriefing } from "@/server/db/repositories/briefings";
+import { findPendingProposal } from "@/server/db/repositories/ai-proposals";
+import { getLatestRevisionNumber } from "@/server/db/repositories/plans";
 import { findCurrentDay, todayLocalDate, viewDay } from "./day";
 import { getTodaySnapshot } from "./today";
 
@@ -37,6 +41,8 @@ beforeEach(() => {
   vi.mocked(listTasksForDay).mockResolvedValue([]);
   vi.mocked(listSpilloverTasks).mockResolvedValue([]);
   vi.mocked(getLatestBriefing).mockResolvedValue(null);
+  vi.mocked(findPendingProposal).mockResolvedValue(null);
+  vi.mocked(getLatestRevisionNumber).mockResolvedValue(1);
 });
 
 describe("getTodaySnapshot", () => {

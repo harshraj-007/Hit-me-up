@@ -3,8 +3,11 @@ import { addDays, dayBoundsUtc, isPlanDateAllowed } from "@/domain/days";
 import { requireUser } from "@/server/auth/session";
 import { createSupabaseServerClient } from "@/server/db/supabase-server";
 import { listSpilloverTasks, listTasksForDay } from "@/server/db/repositories/tasks";
+import { findPendingProposal } from "@/server/db/repositories/ai-proposals";
+import { getLatestRevisionNumber } from "@/server/db/repositories/plans";
 import { getLatestBriefing } from "@/server/db/repositories/briefings";
 import type { Task } from "@/domain/tasks";
+import type { AiProposal } from "@/server/db/repositories/ai-proposals";
 import { findCurrentDay, todayLocalDate, viewDay } from "./day";
 
 export interface TodaySnapshot {
@@ -30,6 +33,10 @@ export interface TodaySnapshot {
    *  stay the previous day's tasks: shown and planned around here, never counted here. */
   spillover: Task[];
   briefingText: string | null;
+  /** This day's pending (unconfirmed) AI proposal, if any (Phase 5.5) — enough to resume the
+   *  review UI after a refresh with no AI call. `isStale` compares its base revision against
+   *  this same read's `tasks`/plan state; it is a live comparison, never itself persisted. */
+  pendingAiProposal: { proposal: AiProposal; isStale: boolean } | null;
   /** The instant this snapshot was computed — the shared clock's starting point. */
   now: Date;
 }
@@ -79,10 +86,12 @@ export async function getTodaySnapshot(
   const dayStart = dayBoundsUtc(localDate, timezone).start;
 
   const previous = await viewDay(supabase, user.id, addDays(localDate, -1));
-  const [tasks, spillover, briefing] = await Promise.all([
+  const [tasks, spillover, briefing, pendingProposal, currentRevision] = await Promise.all([
     day ? listTasksForDay(supabase, day.id) : Promise.resolve([]),
     previous ? listSpilloverTasks(supabase, previous.id, dayStart) : Promise.resolve([]),
     viewState === "today" && day ? getLatestBriefing(supabase, day.id) : Promise.resolve(null),
+    day ? findPendingProposal(supabase, day.id) : Promise.resolve(null),
+    day ? getLatestRevisionNumber(supabase, day.id) : Promise.resolve(null),
   ]);
 
   return {
@@ -93,6 +102,9 @@ export async function getTodaySnapshot(
     previousDay: previous ? { localDate: previous.localDate, timezone: previous.timezone } : null,
     dayId: day?.id ?? null,
     localDate,
+    pendingAiProposal: pendingProposal
+      ? { proposal: pendingProposal, isStale: currentRevision !== pendingProposal.baseRevision }
+      : null,
     timezone,
     tasks,
     spillover,

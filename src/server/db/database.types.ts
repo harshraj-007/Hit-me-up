@@ -26,6 +26,10 @@ type TaskSourceColumn = "user" | "planner";
  *  deterministic 'system' planner. */
 type HistorySourceColumn = "user" | "system" | "ai";
 type PlanRevisionSourceColumn = "system" | "user" | "ai";
+/** Phase 5.5. */
+type AiProposalSourceColumn = "typed" | "voice";
+type AiProposalValidationStatusColumn = "valid" | "partially_valid" | "invalid";
+type AiProposalStatusColumn = "generated" | "confirmed" | "discarded";
 
 export interface Database {
   public: {
@@ -196,6 +200,49 @@ export interface Database {
         };
         Relationships: [];
       };
+      ai_proposals: {
+        Row: {
+          id: string;
+          user_id: string;
+          day_id: string;
+          base_revision: number;
+          source: AiProposalSourceColumn;
+          transcript_text: string;
+          understood: string;
+          unresolved: unknown;
+          changes: unknown;
+          rejected: unknown;
+          conflicts_after: unknown;
+          validation_status: AiProposalValidationStatusColumn;
+          status: AiProposalStatusColumn;
+          created_at: string;
+          confirmed_at: string | null;
+          applied_revision_number: number | null;
+        };
+        // Not used directly — every write goes through create_ai_proposal() /
+        // confirm_ai_proposal_by_id() / discard_ai_proposal() (all below), never .insert()/
+        // .update(). Shapes are still real, not `never`, for the same reason noted above.
+        Insert: {
+          user_id: string;
+          day_id: string;
+          base_revision: number;
+          source: AiProposalSourceColumn;
+          transcript_text: string;
+          understood: string;
+          unresolved?: unknown;
+          changes: unknown;
+          rejected?: unknown;
+          conflicts_after?: unknown;
+          validation_status: AiProposalValidationStatusColumn;
+          status?: AiProposalStatusColumn;
+        };
+        Update: {
+          status?: AiProposalStatusColumn;
+          confirmed_at?: string | null;
+          applied_revision_number?: number | null;
+        };
+        Relationships: [];
+      };
     };
     Views: Record<string, never>;
     Functions: {
@@ -253,6 +300,38 @@ export interface Database {
         };
         /** The new plan revision number. Never null: a proposal is always 1-20 changes. */
         Returns: number;
+      };
+      create_ai_proposal: {
+        Args: {
+          p_day_id: string;
+          p_base_revision: number;
+          p_source: AiProposalSourceColumn;
+          p_transcript_text: string;
+          p_understood: string;
+          /** JSON array of strings. */
+          p_unresolved: unknown;
+          /** JSON array of ConfirmChangeRow — the same shape confirm_ai_proposal() accepts. */
+          p_changes: unknown;
+          /** JSON array of Rejection (display-only). */
+          p_rejected: unknown;
+          /** JSON array of ConflictAfter (display-only). */
+          p_conflicts_after: unknown;
+          p_validation_status: AiProposalValidationStatusColumn;
+        };
+        Returns: Database["public"]["Tables"]["ai_proposals"]["Row"];
+      };
+      confirm_ai_proposal_by_id: {
+        Args: {
+          p_proposal_id: string;
+        };
+        /** The new plan revision number. */
+        Returns: number;
+      };
+      discard_ai_proposal: {
+        Args: {
+          p_proposal_id: string;
+        };
+        Returns: undefined;
       };
     };
     Enums: Record<string, never>;

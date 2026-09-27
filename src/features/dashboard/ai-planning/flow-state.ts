@@ -1,6 +1,6 @@
 import type { VoiceCaptureError } from "@/lib/voice/speech-recognition";
-import type { AiProposalResult } from "@/server/services/ai-planning";
 import type { ConfirmAiProposalOutcome } from "@/server/services/ai-confirmation";
+import type { ProposalView } from "./proposal-view";
 
 /**
  * The AI-plan panel's state machine, as a pure reducer — no React, no browser API, no network
@@ -27,21 +27,37 @@ export type VoicePlanState =
   | {
       status: "proposal_ready";
       epoch: number;
-      source: PlanInputSource;
-      text: string;
-      result: AiProposalResult;
+      /** Null for a proposal resumed after a refresh — its original transcript wasn't
+       *  re-fetched, and nothing needs it: reviewing/confirming/discarding all work from
+       *  `view` alone. */
+      source: PlanInputSource | null;
+      text: string | null;
+      view: ProposalView;
     }
   | {
       status: "confirming";
       epoch: number;
-      source: PlanInputSource;
-      text: string;
-      result: AiProposalResult;
+      source: PlanInputSource | null;
+      text: string | null;
+      view: ProposalView;
     }
   | { status: "applied"; epoch: number; outcome: ConfirmAiProposalOutcome }
   | { status: "error"; epoch: number; message: string; returnTo: "idle" | "transcript_review" };
 
 export const initialVoicePlanState: VoicePlanState = { status: "idle", epoch: 0 };
+
+/**
+ * The state a panel mounts into when the server already found a pending, persisted proposal
+ * for this day (Phase 5.5 resume — see `loadPendingAiProposal`). Deliberately not a reducer
+ * transition: resuming is what the page START looks like, not something that happens IN
+ * response to a dispatched event, and keeping it a plain function makes "what does the panel
+ * show on load" trivial to test without a `useReducer` at all. No AI call and no auto-apply
+ * happen here — same status/isStale, same Apply gating, as any other `proposal_ready` state.
+ */
+export function initialVoicePlanStateFor(resumed: ProposalView | null): VoicePlanState {
+  if (!resumed) return initialVoicePlanState;
+  return { status: "proposal_ready", epoch: 0, source: null, text: null, view: resumed };
+}
 
 export type VoicePlanEvent =
   | { type: "start_typing" }
@@ -52,7 +68,7 @@ export type VoicePlanEvent =
   | { type: "recognition_error"; epoch: number; error: VoiceCaptureError }
   | { type: "edit_text"; text: string }
   | { type: "submit"; epoch: number }
-  | { type: "proposal_ready"; epoch: number; result: AiProposalResult }
+  | { type: "proposal_ready"; epoch: number; view: ProposalView }
   | { type: "proposal_failed"; epoch: number; message: string }
   | { type: "confirm"; epoch: number }
   | { type: "confirmed"; epoch: number; outcome: ConfirmAiProposalOutcome }
@@ -120,7 +136,7 @@ export function reduceVoicePlan(state: VoicePlanState, event: VoicePlanEvent): V
         epoch: state.epoch,
         source: state.source,
         text: state.text,
-        result: event.result,
+        view: event.view,
       };
 
     case "proposal_failed":
@@ -135,14 +151,24 @@ export function reduceVoicePlan(state: VoicePlanState, event: VoicePlanEvent): V
     case "confirm":
       // Same epoch as the proposal being confirmed (like `submit`, this continues the current
       // branch rather than starting a new one) — so confirming a proposal that's already been
-      // superseded (the user cancelled, or a fresher proposal replaced it) is refused.
-      if (state.status !== "proposal_ready" || isStale(state, event.epoch)) return state;
+      // superseded (the user cancelled, or a fresher proposal replaced it) is refused. Also
+      // refused for anything less than fully valid, or a resumed proposal found stale — the
+      // same gate `confirm_ai_proposal_by_id()` enforces in SQL regardless, mirrored here so
+      // the UI never even tries (and never shows Apply as available) for either case.
+      if (
+        state.status !== "proposal_ready" ||
+        isStale(state, event.epoch) ||
+        state.view.status !== "valid" ||
+        state.view.isStale
+      ) {
+        return state;
+      }
       return {
         status: "confirming",
         epoch: state.epoch,
         source: state.source,
         text: state.text,
-        result: state.result,
+        view: state.view,
       };
 
     case "confirmed":

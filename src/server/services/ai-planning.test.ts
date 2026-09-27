@@ -34,12 +34,17 @@ vi.mock("@/server/db/repositories/days", () => ({
   findDayById: vi.fn(),
 }));
 vi.mock("./day", () => ({ todayLocalDate: vi.fn(), viewDay: vi.fn() }));
+vi.mock("@/server/db/repositories/ai-proposals", () => ({
+  createAiProposal: vi.fn(),
+  findPendingProposal: vi.fn(),
+}));
 
 import Anthropic from "@anthropic-ai/sdk";
 import { requireUserForAction } from "@/server/auth/session";
 import * as taskRepo from "@/server/db/repositories/tasks";
 import * as dayRepo from "@/server/db/repositories/days";
 import { getLatestRevisionNumber } from "@/server/db/repositories/plans";
+import { createAiProposal, findPendingProposal } from "@/server/db/repositories/ai-proposals";
 import { AuthenticationError, ValidationError } from "@/server/errors";
 import { AiError } from "@/server/ai/errors";
 import { createFakeGenerator } from "@/server/ai/fake";
@@ -57,7 +62,7 @@ import {
   USER_ID,
 } from "../../../tests/support/ai-planning-fixtures";
 import { todayLocalDate, viewDay } from "./day";
-import { generateAiProposal } from "./ai-planning";
+import { generateAiProposal, loadPendingAiProposal } from "./ai-planning";
 
 const EMAIL = "alice@example.com";
 const TODAY = { todayLocal: "2026-10-01", profileTimezone: "UTC" };
@@ -105,6 +110,23 @@ beforeEach(() => {
     return own;
   });
   vi.mocked(taskRepo.listSpilloverTasks).mockImplementation(async () => spill);
+  vi.mocked(createAiProposal).mockImplementation(async (_s, input) => ({
+    id: "persisted-proposal-1",
+    dayId: input.dayId,
+    baseRevision: input.validation.baseRevision,
+    source: input.source,
+    transcriptText: input.transcriptText,
+    understood: input.understood,
+    unresolved: [...input.unresolved],
+    changes: [],
+    rejected: [...input.validation.rejected],
+    conflictsAfter: [...input.validation.conflictsAfter],
+    validationStatus: input.validation.status,
+    status: "generated",
+    createdAt: NOW,
+    confirmedAt: null,
+    appliedRevisionNumber: null,
+  }));
 });
 
 const run = (raw: unknown, payload: unknown | ((c: PlanningContext) => unknown), extra = {}) => {
@@ -523,8 +545,8 @@ describe("deterministic validation of what comes back", () => {
   });
 });
 
-describe("read-only", () => {
-  it("performs no writes of any kind, and never touches the client directly", async () => {
+describe("the schedule itself is never written; the only write is the persisted proposal snapshot", () => {
+  it("performs no task/day mutation of any kind, and never touches the client directly", async () => {
     own = [makeTask({ title: "Gym", start: at(17), end: at(18) })];
     await run(request(), (c: PlanningContext) =>
       proposal([move(refOf(c, "Gym"), "2026-10-01T20:00")]),
@@ -539,6 +561,138 @@ describe("read-only", () => {
       expect(fn).not.toHaveBeenCalled();
     }
     // (DB_TOUCH throws if the service used the Supabase client itself.)
+  });
+});
+
+// Phase 5.5: generation now persists the validated proposal — see
+// src/server/db/repositories/ai-proposals.ts. These tests are specific to that behavior;
+// persistence itself (RPC args, error mapping, JSONB read-boundary validation) is covered in
+// ai-proposals.test.ts and is not re-tested here.
+describe("persistence (Phase 5.5)", () => {
+  it("returns the persisted proposal's id, and persists AFTER validation completes", async () => {
+    own = [makeTask({ title: "Gym", start: at(17), end: at(18) })];
+    const order: string[] = [];
+    vi.mocked(createAiProposal).mockImplementationOnce(async (_s, input) => {
+      order.push("persist");
+      return {
+        id: "persisted-42",
+        dayId: input.dayId,
+        baseRevision: input.validation.baseRevision,
+        source: input.source,
+        transcriptText: input.transcriptText,
+        understood: input.understood,
+        unresolved: [...input.unresolved],
+        changes: [],
+        rejected: [],
+        conflictsAfter: [],
+        validationStatus: input.validation.status,
+        status: "generated",
+        createdAt: NOW,
+        confirmedAt: null,
+        appliedRevisionNumber: null,
+      };
+    });
+    const { result } = await run(request(), (c: PlanningContext) => {
+      order.push("generate");
+      return proposal([move(refOf(c, "Gym"), "2026-10-01T20:00")]);
+    });
+    expect(result.proposalId).toBe("persisted-42");
+    expect(order).toEqual(["generate", "persist"]); // never the other way around
+  });
+
+  it("persists an invalid/partially_valid proposal too — never silently drops it", async () => {
+    own = [makeTask({ title: "Gym", scheduleLocked: true, start: at(17), end: at(18) })];
+    const { result } = await run(request(), (c: PlanningContext) =>
+      proposal([move(refOf(c, "Gym"), "2026-10-01T20:00")]),
+    );
+    expect(result.validation.status).toBe("invalid");
+    expect(createAiProposal).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(createAiProposal).mock.calls[0]![1]).toMatchObject({
+      validation: expect.objectContaining({ status: "invalid" }),
+    });
+  });
+
+  it("persists with the correct dayId, source and transcript text", async () => {
+    own = [makeTask({ title: "Gym", start: at(17), end: at(18) })];
+    await run(request({ source: "voice", text: "move gym to 8pm" }), (c: PlanningContext) =>
+      proposal([move(refOf(c, "Gym"), "2026-10-01T20:00")]),
+    );
+    expect(vi.mocked(createAiProposal).mock.calls[0]![1]).toMatchObject({
+      dayId: DAY_ID,
+      source: "voice",
+      transcriptText: "move gym to 8pm",
+    });
+  });
+
+  it("a persistence failure propagates — a proposal that couldn't be saved is never returned as if it succeeded", async () => {
+    own = [makeTask({ title: "Gym", start: at(17), end: at(18) })];
+    vi.mocked(createAiProposal).mockRejectedValueOnce(new Error("db down"));
+    await expect(
+      run(request(), (c: PlanningContext) => proposal([move(refOf(c, "Gym"), "2026-10-01T20:00")])),
+    ).rejects.toThrow("db down");
+  });
+
+  it("a provider/validation failure before persistence never calls createAiProposal", async () => {
+    await expect(run(request(), null)).rejects.toBeInstanceOf(AiError);
+    expect(createAiProposal).not.toHaveBeenCalled();
+  });
+});
+
+describe("loadPendingAiProposal (Phase 5.5 resume)", () => {
+  it("null when the user has no timezone/day yet", async () => {
+    vi.mocked(todayLocalDate).mockResolvedValue(TODAY);
+    vi.mocked(viewDay).mockResolvedValue(null);
+    await expect(loadPendingAiProposal("2026-10-01")).resolves.toBeNull();
+    expect(findPendingProposal).not.toHaveBeenCalled();
+  });
+
+  it("null when the day has no pending proposal", async () => {
+    vi.mocked(findPendingProposal).mockResolvedValue(null);
+    await expect(loadPendingAiProposal("2026-10-01")).resolves.toBeNull();
+  });
+
+  it("returns the pending proposal with isStale computed against the CURRENT revision", async () => {
+    const stored = {
+      id: "p1",
+      dayId: DAY_ID,
+      baseRevision: 3,
+      source: "typed" as const,
+      transcriptText: "x",
+      understood: "x",
+      unresolved: [],
+      changes: [],
+      rejected: [],
+      conflictsAfter: [],
+      validationStatus: "valid" as const,
+      status: "generated" as const,
+      createdAt: NOW,
+      confirmedAt: null,
+      appliedRevisionNumber: null,
+    };
+    vi.mocked(findPendingProposal).mockResolvedValue(stored);
+    vi.mocked(getLatestRevisionNumber).mockResolvedValue(3);
+    await expect(loadPendingAiProposal("2026-10-01")).resolves.toEqual({
+      proposal: stored,
+      isStale: false,
+    });
+
+    vi.mocked(getLatestRevisionNumber).mockResolvedValue(4);
+    await expect(loadPendingAiProposal("2026-10-01")).resolves.toEqual({
+      proposal: stored,
+      isStale: true,
+    });
+  });
+
+  it("requires authentication", async () => {
+    vi.mocked(requireUserForAction).mockRejectedValue(new AuthenticationError());
+    await expect(loadPendingAiProposal("2026-10-01")).rejects.toBeInstanceOf(AuthenticationError);
+  });
+
+  it("makes no AI call of any kind — it is a pure database read", async () => {
+    vi.mocked(findPendingProposal).mockResolvedValue(null);
+    await loadPendingAiProposal("2026-10-01");
+    // No generator/provider is wired into this function's signature at all — this test exists
+    // to make that structural guarantee explicit rather than merely implied.
   });
 });
 

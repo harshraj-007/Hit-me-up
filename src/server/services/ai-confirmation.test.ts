@@ -9,6 +9,11 @@ vi.mock("@/server/db/repositories/tasks", () => ({
   confirmAiProposal: vi.fn(),
   listTasksForDay: vi.fn(),
 }));
+vi.mock("@/server/db/repositories/ai-proposals", () => ({
+  confirmAiProposalById: vi.fn(),
+  discardAiProposal: vi.fn(),
+  getAiProposalById: vi.fn(),
+}));
 vi.mock("./day", () => ({ viewDay: vi.fn() }));
 
 import { revalidatePath } from "next/cache";
@@ -17,11 +22,20 @@ import {
   confirmAiProposal as confirmAiProposalRpc,
   listTasksForDay,
 } from "@/server/db/repositories/tasks";
+import {
+  confirmAiProposalById,
+  discardAiProposal as discardAiProposalRpc,
+  getAiProposalById,
+} from "@/server/db/repositories/ai-proposals";
 import { z } from "zod";
 import { AiConfirmationError, AuthenticationError, ValidationError } from "@/server/errors";
 import type { Task } from "@/domain/tasks";
 import { viewDay } from "./day";
-import { confirmAiProposal } from "./ai-confirmation";
+import {
+  confirmAiProposal,
+  confirmPersistedAiProposal,
+  discardPersistedAiProposal,
+} from "./ai-confirmation";
 
 const DAY = { id: "day-1", userId: "user-1", localDate: "2026-10-01", timezone: "UTC" };
 const UUID = "0b7e3c1e-5a52-4b6c-9d0f-2f1a4f5e6a77";
@@ -148,4 +162,156 @@ describe("confirmAiProposal", () => {
       expect((error as AiConfirmationError).reason).toBe(reason);
     },
   );
+});
+
+// Phase 5.5: the app's ACTUAL confirmation path — a persisted proposal, confirmed by id.
+// `confirmAiProposal` above (the raw day/revision/changes shape) is kept as a lower-level
+// primitive but is no longer reachable from any Server Action; see actions.ts.
+const PROPOSAL = {
+  id: "aaaaaaaa-1111-4111-8111-111111111111",
+  dayId: "day-1",
+  baseRevision: 3,
+  source: "voice" as const,
+  transcriptText: "move gym to 8pm",
+  understood: "Move gym to 8pm.",
+  unresolved: [],
+  changes: [
+    { ref: "t1", task_id: UUID, type: "move" as const, new_start: "2026-10-01T20:00:00.000Z" },
+  ],
+  rejected: [],
+  conflictsAfter: [],
+  validationStatus: "valid" as const,
+  status: "generated" as const,
+  createdAt: new Date("2026-10-01T09:00:00.000Z"),
+  confirmedAt: null,
+  appliedRevisionNumber: null,
+};
+
+describe("confirmPersistedAiProposal (Phase 5.5, the app's real confirmation path)", () => {
+  beforeEach(() => {
+    vi.mocked(getAiProposalById).mockResolvedValue(PROPOSAL);
+    vi.mocked(confirmAiProposalById).mockResolvedValue(5);
+  });
+
+  it("requires authentication before doing anything else", async () => {
+    vi.mocked(requireUserForAction).mockRejectedValue(new AuthenticationError());
+    await expect(confirmPersistedAiProposal({ proposalId: PROPOSAL.id })).rejects.toBeInstanceOf(
+      AuthenticationError,
+    );
+    expect(getAiProposalById).not.toHaveBeenCalled();
+    expect(confirmAiProposalById).not.toHaveBeenCalled();
+  });
+
+  it("accepts ONLY a proposal id — no day, revision, or change can be supplied at all", async () => {
+    for (const bad of [
+      { proposalId: PROPOSAL.id, baseRevision: 999 },
+      { proposalId: PROPOSAL.id, dayId: "someone-elses-day" },
+      {
+        proposalId: PROPOSAL.id,
+        changes: [{ ref: "t1", taskId: UUID, type: "move", newStart: "x" }],
+      },
+      { proposalId: PROPOSAL.id, planningDate: "2026-10-01" },
+      { proposalId: "not-a-uuid" },
+      {},
+    ]) {
+      await expect(confirmPersistedAiProposal(bad)).rejects.toBeInstanceOf(z.ZodError);
+    }
+    expect(confirmAiProposalById).not.toHaveBeenCalled();
+  });
+
+  it("passes ONLY the proposal id to the RPC — the day/revision/changes it confirms against come from the stored row, not this call", async () => {
+    await confirmPersistedAiProposal({ proposalId: PROPOSAL.id });
+    expect(confirmAiProposalById).toHaveBeenCalledWith(expect.anything(), PROPOSAL.id);
+    expect(confirmAiProposalById).toHaveBeenCalledTimes(1);
+  });
+
+  it("a missing/foreign proposal id is refused before ever calling the RPC", async () => {
+    vi.mocked(getAiProposalById).mockResolvedValue(null);
+    const error = await confirmPersistedAiProposal({ proposalId: PROPOSAL.id }).then(
+      () => null,
+      (e: unknown) => e,
+    );
+    expect(error).toBeInstanceOf(AiConfirmationError);
+    expect((error as AiConfirmationError).reason).toBe("proposal_unavailable");
+    expect(confirmAiProposalById).not.toHaveBeenCalled();
+  });
+
+  it("re-reads the day's tasks (the proposal's OWN dayId, not any client input) after success", async () => {
+    const fresh = [makeTask({ id: "task-9" })];
+    vi.mocked(listTasksForDay).mockResolvedValue(fresh);
+    const result = await confirmPersistedAiProposal({ proposalId: PROPOSAL.id });
+    expect(listTasksForDay).toHaveBeenCalledWith(expect.anything(), PROPOSAL.dayId);
+    expect(result).toEqual({ revisionNumber: 5, tasks: fresh });
+  });
+
+  it("revalidates the Today page after a successful confirmation", async () => {
+    await confirmPersistedAiProposal({ proposalId: PROPOSAL.id });
+    expect(revalidatePath).toHaveBeenCalledWith("/today");
+  });
+
+  it("propagates the RPC's AiConfirmationError untouched, and re-reads nothing on failure", async () => {
+    vi.mocked(confirmAiProposalById).mockRejectedValue(new AiConfirmationError("stale_revision"));
+    await expect(confirmPersistedAiProposal({ proposalId: PROPOSAL.id })).rejects.toBeInstanceOf(
+      AiConfirmationError,
+    );
+    expect(listTasksForDay).not.toHaveBeenCalled();
+    expect(revalidatePath).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    "stale_revision",
+    "task_ineligible",
+    "proposal_unavailable",
+    "conflict",
+    "invalid_proposal",
+  ] as const)("surfaces AiConfirmationError(%s) with its reason intact", async (reason) => {
+    vi.mocked(confirmAiProposalById).mockRejectedValue(new AiConfirmationError(reason));
+    const error = await confirmPersistedAiProposal({ proposalId: PROPOSAL.id }).then(
+      () => null,
+      (e: unknown) => e,
+    );
+    expect(error).toBeInstanceOf(AiConfirmationError);
+    expect((error as AiConfirmationError).reason).toBe(reason);
+  });
+
+  it("this is a genuinely separate, replay-safe path from the raw confirmAiProposal above — it never calls the old RPC directly", async () => {
+    await confirmPersistedAiProposal({ proposalId: PROPOSAL.id });
+    expect(confirmAiProposalRpc).not.toHaveBeenCalled();
+  });
+});
+
+describe("discardPersistedAiProposal (Phase 5.5)", () => {
+  it("requires authentication", async () => {
+    vi.mocked(requireUserForAction).mockRejectedValue(new AuthenticationError());
+    await expect(discardPersistedAiProposal({ proposalId: PROPOSAL.id })).rejects.toBeInstanceOf(
+      AuthenticationError,
+    );
+    expect(discardAiProposalRpc).not.toHaveBeenCalled();
+  });
+
+  it("accepts only a proposal id", async () => {
+    for (const bad of [
+      {},
+      { proposalId: "not-a-uuid" },
+      { proposalId: PROPOSAL.id, status: "confirmed" },
+    ]) {
+      await expect(discardPersistedAiProposal(bad)).rejects.toBeInstanceOf(z.ZodError);
+    }
+    expect(discardAiProposalRpc).not.toHaveBeenCalled();
+  });
+
+  it("calls the RPC with the id and revalidates — no read of the proposal or the tasks is needed", async () => {
+    await discardPersistedAiProposal({ proposalId: PROPOSAL.id });
+    expect(discardAiProposalRpc).toHaveBeenCalledWith(expect.anything(), PROPOSAL.id);
+    expect(revalidatePath).toHaveBeenCalledWith("/today");
+    expect(getAiProposalById).not.toHaveBeenCalled();
+    expect(listTasksForDay).not.toHaveBeenCalled();
+  });
+
+  it("propagates a database failure", async () => {
+    vi.mocked(discardAiProposalRpc).mockRejectedValue(new Error("db down"));
+    await expect(discardPersistedAiProposal({ proposalId: PROPOSAL.id })).rejects.toThrow(
+      "db down",
+    );
+  });
 });

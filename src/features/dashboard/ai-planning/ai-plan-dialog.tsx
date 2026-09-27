@@ -8,8 +8,8 @@ import { useToast } from "@/components/ui/toast-provider";
 import { isVoiceCaptureSupported } from "@/lib/voice/speech-recognition";
 import { formatClock } from "@/lib/format/time";
 import { useAiPlanFlow } from "./use-ai-plan-flow";
+import type { ProposalView } from "./proposal-view";
 import type { ConfirmAiProposalOutcome } from "@/server/services/ai-confirmation";
-import type { AiProposalResult } from "@/server/services/ai-planning";
 
 export interface AiPlanDialogProps {
   open: boolean;
@@ -17,28 +17,34 @@ export interface AiPlanDialogProps {
   planningDate: string;
   /** The day's own frozen timezone — every proposed time is shown in it, never the browser's. */
   timezone: string;
+  /** A proposal the server already found pending for this day (Phase 5.5 resume) — the dialog
+   *  opens straight into reviewing it, with no AI call. Null when there is none. */
+  resumedProposal: ProposalView | null;
   onApplied: (outcome: ConfirmAiProposalOutcome) => void;
 }
 
 const MAX_TRANSCRIPT_LENGTH = 1000;
 
 /**
- * The one entry point for both typed and voice AI planning requests. Voice is purely an input
- * mode: recording only ever produces a transcript for the SAME review step typed text goes
- * through, and nothing past that point knows or cares which mode produced the text — see
- * `use-ai-plan-flow.ts`, which sends it to the existing `generateAiProposal`/`confirmAiProposal`
- * pipeline unchanged. Nothing here ever calls the confirm action except the explicit Apply
- * button, and Apply itself is disabled unless the validator reported `status: "valid"`.
+ * The one entry point for both typed and voice AI planning requests, and for resuming a
+ * proposal the server generated earlier (Phase 5.5). Voice is purely an input mode: recording
+ * only ever produces a transcript for the SAME review step typed text goes through, and
+ * nothing past that point knows or cares which mode produced the text, or whether the review
+ * screen it's looking at came from a fresh generation or a resumed one — see
+ * `use-ai-plan-flow.ts` and `proposal-view.ts`. Nothing here ever calls the confirm action
+ * except the explicit Apply button, and Apply itself is disabled unless the validator reported
+ * `status: "valid"` AND (for a resumed proposal) the schedule hasn't changed since.
  */
 export function AiPlanDialog({
   open,
   onOpenChange,
   planningDate,
   timezone,
+  resumedProposal,
   onApplied,
 }: AiPlanDialogProps) {
   const { toast } = useToast();
-  const flow = useAiPlanFlow({ planningDate });
+  const flow = useAiPlanFlow({ planningDate, resumedProposal });
   const { state } = flow;
   const voiceSupported = useMemo(() => isVoiceCaptureSupported(), []);
 
@@ -140,7 +146,7 @@ export function AiPlanDialog({
 
         {state.status === "proposal_ready" ? (
           <ProposalReview
-            result={state.result}
+            view={state.view}
             timezone={timezone}
             onCancel={flow.cancel}
             onApply={() => void flow.confirm()}
@@ -215,31 +221,38 @@ function TranscriptReview({
 }
 
 function ProposalReview({
-  result,
+  view,
   timezone,
   onCancel,
   onApply,
 }: {
-  result: AiProposalResult;
+  view: ProposalView;
   timezone: string;
   onCancel: () => void;
   onApply: () => void;
 }) {
-  const { validation } = result;
-  const canApply = validation.status === "valid";
+  // Stale is checked first and independently of `status`: a resumed proposal can be `valid`
+  // AND stale at once (it was valid when generated; the schedule just moved on since).
+  const canApply = !view.isStale && view.status === "valid";
 
   return (
     <div className="flex flex-col gap-3">
-      <p className="text-sm text-foreground">{result.understood}</p>
+      {view.isStale ? (
+        <p className="rounded-md bg-surface p-2.5 text-sm text-status-late" role="status">
+          This plan is outdated because your schedule changed. Generate a new plan.
+        </p>
+      ) : null}
 
-      {validation.accepted.length > 0 ? (
+      <p className="text-sm text-foreground">{view.understood}</p>
+
+      {view.accepted.length > 0 ? (
         <ul className="flex flex-col gap-1.5">
-          {validation.accepted.map((change) => (
+          {view.accepted.map((change) => (
             <li
-              key={change.taskId}
+              key={change.ref}
               className="rounded-md border border-border bg-surface px-3 py-2 text-sm"
             >
-              {change.kind === "move" ? (
+              {change.kind === "move" && change.newStart ? (
                 <>
                   Move to{" "}
                   <span className="font-medium">{formatClock(change.newStart, timezone)}</span>
@@ -255,43 +268,43 @@ function ProposalReview({
         </ul>
       ) : null}
 
-      {validation.rejected.length > 0 ? (
+      {view.rejectedMessages.length > 0 ? (
         <ul className="flex flex-col gap-1">
-          {validation.rejected.map((rejection, index) => (
+          {view.rejectedMessages.map((message, index) => (
             <li key={index} className="text-foreground-muted flex items-start gap-1.5 text-xs">
               <X aria-hidden className="mt-0.5 size-3 shrink-0 text-danger" />
-              {rejection.message}
+              {message}
             </li>
           ))}
         </ul>
       ) : null}
 
-      {validation.conflictsAfter.length > 0 ? (
+      {view.conflictCount > 0 ? (
         <p className="text-xs text-status-late">
-          {validation.conflictsAfter.length === 1
+          {view.conflictCount === 1
             ? "One overlap would remain."
-            : `${validation.conflictsAfter.length} overlaps would remain.`}
+            : `${view.conflictCount} overlaps would remain.`}
         </p>
       ) : null}
 
-      {result.unresolved.length > 0 ? (
+      {view.unresolved.length > 0 ? (
         <div className="text-foreground-muted rounded-md bg-surface p-2.5 text-xs">
           <p className="mb-1 font-medium">Not applied:</p>
           <ul className="list-inside list-disc">
-            {result.unresolved.map((item, index) => (
+            {view.unresolved.map((item, index) => (
               <li key={index}>{item}</li>
             ))}
           </ul>
         </div>
       ) : null}
 
-      {!canApply && validation.accepted.length === 0 ? (
+      {!canApply && view.accepted.length === 0 && !view.isStale ? (
         <p className="text-foreground-muted text-sm">Nothing here can be applied.</p>
       ) : null}
 
       <div className="flex justify-end gap-2">
         <Button variant="ghost" size="sm" onClick={onCancel}>
-          Cancel
+          {view.isStale ? "Dismiss" : "Cancel"}
         </Button>
         <Button size="sm" onClick={onApply} disabled={!canApply}>
           Apply

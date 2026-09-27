@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import { redirect } from "next/navigation";
 import { TimezoneSetup } from "@/components/layout/timezone-setup";
 import { DashboardView } from "@/features/dashboard/dashboard-view";
+import { proposalViewFromPersisted } from "@/features/dashboard/ai-planning/proposal-view";
 import { getTodaySnapshot } from "@/server/services/today";
 
 export const metadata: Metadata = { title: "Today" };
@@ -51,6 +52,14 @@ export default async function TodayPage({
       initialSpillover={snapshot.spillover}
       initialBriefingText={snapshot.briefingText ?? ""}
       initialNow={snapshot.now}
+      initialPendingAiProposal={
+        snapshot.pendingAiProposal
+          ? proposalViewFromPersisted(
+              snapshot.pendingAiProposal.proposal,
+              snapshot.pendingAiProposal.isStale,
+            )
+          : null
+      }
     />
   );
 }

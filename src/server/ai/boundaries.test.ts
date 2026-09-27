@@ -13,9 +13,13 @@ function walk(dir: string): string[] {
 const rel = (p: string) => path.relative(SRC, p);
 const nonTest = (p: string) => !/\.test\.tsx?$/.test(p);
 const imports = (file: string) =>
-  [...fs.readFileSync(file, "utf8").matchAll(/(?:from|import)\s*\(?\s*["']([^"']+)["']/g)].map(
-    (m) => m[1]!,
-  );
+  [
+    ...fs
+      .readFileSync(file, "utf8")
+      // A negative lookbehind for "." excludes Supabase's `.from("table")` query builder,
+      // which this pattern would otherwise conflate with an ES `... from "module"` import.
+      .matchAll(/(?<!\.)(?:from|import)\s*\(?\s*["']([^"']+)["']/g),
+  ].map((m) => m[1]!);
 
 describe("import boundaries", () => {
   const files = walk(SRC);

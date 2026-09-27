@@ -17,6 +17,7 @@ import { DayNav } from "./day-nav";
 import { toDashboardTask } from "./map-task";
 import { RescheduleDialog } from "./reschedule-dialog";
 import { AiPlanDialog } from "./ai-planning/ai-plan-dialog";
+import type { ProposalView } from "./ai-planning/proposal-view";
 import { computeRemainingMinutes } from "./summary";
 import { TodayTimeline, type TimelineHandle } from "./today-timeline";
 import { useNow } from "./use-now";
@@ -40,6 +41,8 @@ export interface DashboardViewProps {
   /** The instant the server snapshot was computed — the shared clock's starting point, so
    *  server and client render the same thing on first paint. */
   initialNow: Date;
+  /** A pending AI proposal the server already found for this day (Phase 5.5 resume), or null. */
+  initialPendingAiProposal: ProposalView | null;
 }
 
 /**
@@ -64,6 +67,7 @@ export function DashboardView({
   initialSpillover,
   initialBriefingText,
   initialNow,
+  initialPendingAiProposal,
 }: DashboardViewProps) {
   const [tasks, setTasks] = useState<Task[]>(initialTasks);
   const [spillover, setSpillover] = useState<Task[]>(initialSpillover);
@@ -301,7 +305,7 @@ export function DashboardView({
             disabled={!dayExists}
           >
             <Sparkles aria-hidden className="size-4" />
-            Ask AI
+            {initialPendingAiProposal ? "Review AI plan" : "Ask AI"}
           </Button>
         </div>
       </div>
@@ -380,6 +384,7 @@ export function DashboardView({
         onOpenChange={setAiOpen}
         planningDate={localDate}
         timezone={timezone}
+        resumedProposal={initialPendingAiProposal}
         onApplied={handleAiApplied}
       />
     </div>

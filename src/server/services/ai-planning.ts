@@ -11,6 +11,11 @@ import { createAnthropicGenerator } from "@/server/ai/anthropic";
 import { generateParsedProposal } from "@/server/ai/generate";
 import type { ProposalGenerator } from "@/server/ai/port";
 import { requireUserForAction } from "@/server/auth/session";
+import {
+  createAiProposal,
+  findPendingProposal,
+  type AiProposal,
+} from "@/server/db/repositories/ai-proposals";
 import { getLatestRevisionNumber } from "@/server/db/repositories/plans";
 import { listSpilloverTasks, listTasksForDay } from "@/server/db/repositories/tasks";
 import { createSupabaseServerClient } from "@/server/db/supabase-server";
@@ -18,6 +23,9 @@ import { NotFoundError, ValidationError } from "@/server/errors";
 import { todayLocalDate, viewDay } from "./day";
 
 export interface AiProposalResult {
+  /** The persisted proposal's id (Phase 5.5) — what a later confirm/discard call names.
+   *  Nothing about confirming it is implied by generating it; see ai-confirmation.ts. */
+  proposalId: string;
   /** The model's own words, for display only ("I understood…"). Untrusted text. */
   understood: string;
   /** Requests the model could not turn into a supported change. Untrusted text. */
@@ -34,17 +42,22 @@ export interface AiProposalDeps {
 }
 
 /**
- * Phase 5.2 — generates and validates an AI proposal. READ-ONLY: nothing in here writes to the
- * database (no `ensure_day`, no RPC, no insert/update), stores a proposal, or applies anything.
+ * Phase 5.2/5.5 — generates, validates, and persists an AI proposal. The only write this
+ * function performs is that one persisted snapshot (`create_ai_proposal`, Phase 5.5) — it
+ * never touches `tasks`/`task_history`/`plan_revisions`, calls `ensure_day`, or applies
+ * anything to the schedule.
  *
  *   authenticated user → UserIntent (validated, horizon-checked, server-stamped)
  *   → planning day + tasks + spillover + base revision, all read under the caller's RLS
  *   → PlanningContext (aliases, allow-list) → ProposalGenerator → Zod → validateProposal
- *   → ValidationResult
+ *   → ValidationResult → persist an immutable snapshot → { proposalId, understood, ... }
  *
  * `rawInput` is untrusted. Identity comes only from the verified session. A provider failure
  * surfaces as an `AiError` (sanitized); a proposal the validator refuses is NOT an error — it is
- * a `ValidationResult` with status `invalid` / `partially_valid`.
+ * persisted and returned with status `invalid` / `partially_valid`, exactly like a `valid` one,
+ * so the user can see WHY nothing (or only part) was accepted. Persisting happens only AFTER
+ * validation — an unvalidated proposal is never written, and if persistence itself fails, this
+ * throws rather than returning a proposal the caller could not actually resume later.
  */
 export async function generateAiProposal(
   rawInput: unknown,
@@ -107,10 +120,53 @@ export async function generateAiProposal(
   const proposal = await generateParsedProposal(generator, context, intent, {
     signal: deps.signal,
   });
+  const validation = validateProposal({ state, parsed: proposal });
 
-  return {
+  const persisted = await createAiProposal(supabase, {
+    dayId: day.id,
+    source: intent.source,
+    transcriptText: intent.text,
     understood: proposal.proposal.understood,
     unresolved: proposal.proposal.unresolved,
-    validation: validateProposal({ state, parsed: proposal }),
+    validation,
+  });
+
+  return {
+    proposalId: persisted.id,
+    understood: proposal.proposal.understood,
+    unresolved: proposal.proposal.unresolved,
+    validation,
   };
+}
+
+export interface PendingAiProposal {
+  proposal: AiProposal;
+  /** Whether `proposal.baseRevision` no longer matches the day's CURRENT plan revision — a
+   *  live comparison, recomputed on every read, never itself stored (see the migration for
+   *  why). Decoration only: `confirmPersistedAiProposal` independently re-checks the same
+   *  thing in SQL regardless of what this says. */
+  isStale: boolean;
+}
+
+/**
+ * Read-only: the day's pending (unconfirmed) proposal, if any, with no AI call — a persisted
+ * proposal must be enough to reconstruct the review UI after a refresh or navigation on its
+ * own. Used both by the Today page (server-rendered, so a resumed proposal shows on first
+ * paint) and, if ever needed, directly.
+ */
+export async function loadPendingAiProposal(
+  planningDate: string,
+): Promise<PendingAiProposal | null> {
+  const user = await requireUserForAction();
+  const supabase = await createSupabaseServerClient();
+
+  const day = await viewDay(supabase, user.id, planningDate);
+  if (!day) return null;
+
+  const proposal = await findPendingProposal(supabase, day.id);
+  if (!proposal) return null;
+
+  const currentRevision = await getLatestRevisionNumber(supabase, day.id);
+  const isStale = currentRevision === null || currentRevision !== proposal.baseRevision;
+  return { proposal, isStale };
 }

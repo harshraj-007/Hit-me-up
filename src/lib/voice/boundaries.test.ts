@@ -57,9 +57,9 @@ describe("voice input never reaches the AI provider as audio", () => {
 });
 
 describe("voice cannot bypass confirmation or call the mutation RPC directly", () => {
-  it("no voice/UI file references the confirm_ai_proposal RPC name directly — only the service/repository layer may", () => {
+  it("no voice/UI file CALLS an RPC directly (a doc comment naming one, e.g. explaining why a Server Action exists, is fine — only an actual `.rpc(...)` invocation is not)", () => {
     for (const f of [...voiceFiles, ...aiPlanningUiFiles]) {
-      expect(fs.readFileSync(f, "utf8"), rel(f)).not.toContain("confirm_ai_proposal");
+      expect(fs.readFileSync(f, "utf8"), rel(f)).not.toMatch(/\.rpc\(/);
     }
   });
 

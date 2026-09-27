@@ -86,9 +86,16 @@ export class InternalError extends AppError {
  * foreign one, a locked one and a resolved one are all `task_ineligible`, so a guessed or
  * copied task id is indistinguishable from one that never existed — nothing about another
  * user's data is ever revealed. See the migration for the full SQLSTATE → reason mapping.
+ *
+ * `proposal_unavailable` (Phase 5.5): the PROPOSAL itself — not a task inside it — is not
+ * confirmable right now (missing, not the caller's, already confirmed, or discarded). It is
+ * deliberately not distinguished from `task_ineligible` at the SQLSTATE level either (both are
+ * P0002 from `confirm_ai_proposal_by_id`, on purpose — see the migration), but gets its own
+ * reason/message because the right recovery reads differently ("this plan was already handled"
+ * vs. "a task in it changed") even though the server can't always tell which happened.
  */
 export type AiConfirmationFailureReason =
-  "stale_revision" | "task_ineligible" | "conflict" | "invalid_proposal";
+  "stale_revision" | "task_ineligible" | "conflict" | "invalid_proposal" | "proposal_unavailable";
 
 const AI_CONFIRMATION_MESSAGES: Record<AiConfirmationFailureReason, string> = {
   stale_revision:
@@ -96,6 +103,7 @@ const AI_CONFIRMATION_MESSAGES: Record<AiConfirmationFailureReason, string> = {
   task_ineligible: "One or more tasks in this proposal are no longer available to change.",
   conflict: "Applying these changes would create a scheduling conflict.",
   invalid_proposal: "This proposal couldn't be applied.",
+  proposal_unavailable: "This plan is no longer available to apply. Please review a fresh one.",
 };
 
 export class AiConfirmationError extends AppError {

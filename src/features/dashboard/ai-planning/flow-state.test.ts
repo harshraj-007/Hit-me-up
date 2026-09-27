@@ -1,12 +1,23 @@
 import { describe, expect, it } from "vitest";
-import { initialVoicePlanState, reduceVoicePlan, type VoicePlanState } from "./flow-state";
-import type { AiProposalResult } from "@/server/services/ai-planning";
+import {
+  initialVoicePlanState,
+  initialVoicePlanStateFor,
+  reduceVoicePlan,
+  type VoicePlanState,
+} from "./flow-state";
+import type { ProposalView } from "./proposal-view";
 import type { ConfirmAiProposalOutcome } from "@/server/services/ai-confirmation";
 
-const RESULT: AiProposalResult = {
+const VIEW: ProposalView = {
+  proposalId: "p1",
   understood: "ok",
   unresolved: [],
-  validation: { status: "valid", accepted: [], rejected: [], conflictsAfter: [], baseRevision: 1 },
+  status: "valid",
+  accepted: [{ ref: "t1", kind: "move", newStart: new Date("2026-10-01T20:00:00Z"), reason: "x" }],
+  rejectedMessages: [],
+  conflictCount: 0,
+  baseRevision: 1,
+  isStale: false,
 };
 const OUTCOME: ConfirmAiProposalOutcome = { revisionNumber: 2, tasks: [] };
 
@@ -34,8 +45,8 @@ describe("required chain: idle -> recording -> transcribing -> transcript_review
     s = reduceVoicePlan(s, { type: "submit", epoch: 1 });
     expect(s).toMatchObject({ status: "generating", source: "voice", text: "move gym after 8" });
 
-    s = reduceVoicePlan(s, { type: "proposal_ready", epoch: 1, result: RESULT });
-    expect(s).toMatchObject({ status: "proposal_ready", source: "voice", result: RESULT });
+    s = reduceVoicePlan(s, { type: "proposal_ready", epoch: 1, view: VIEW });
+    expect(s).toMatchObject({ status: "proposal_ready", source: "voice", view: VIEW });
   });
 
   it("walks the same chain for typed input, skipping the recording states entirely", () => {
@@ -67,10 +78,10 @@ describe("proposal_ready -> confirming -> applied", () => {
       epoch: 1,
       source: "voice",
       text: "x",
-      result: RESULT,
+      view: VIEW,
     };
     const confirming = reduceVoicePlan(ready, { type: "confirm", epoch: 1 });
-    expect(confirming).toMatchObject({ status: "confirming", epoch: 1, result: RESULT });
+    expect(confirming).toMatchObject({ status: "confirming", epoch: 1, view: VIEW });
     const applied = reduceVoicePlan(confirming, { type: "confirmed", epoch: 1, outcome: OUTCOME });
     expect(applied).toEqual({ status: "applied", epoch: 1, outcome: OUTCOME });
   });
@@ -83,8 +94,8 @@ describe("error and cancel reachable from every meaningful state", () => {
     { status: "transcribing", epoch: 0, transcript: "x" },
     { status: "transcript_review", epoch: 0, source: "typed", text: "x" },
     { status: "generating", epoch: 0, source: "typed", text: "x" },
-    { status: "proposal_ready", epoch: 0, source: "typed", text: "x", result: RESULT },
-    { status: "confirming", epoch: 0, source: "typed", text: "x", result: RESULT },
+    { status: "proposal_ready", epoch: 0, source: "typed", text: "x", view: VIEW },
+    { status: "confirming", epoch: 0, source: "typed", text: "x", view: VIEW },
     { status: "applied", epoch: 0, outcome: OUTCOME },
   ];
   it.each(states)("cancel always returns to idle with a bumped epoch, from %o", (state) => {
@@ -127,7 +138,7 @@ describe("error and cancel reachable from every meaningful state", () => {
       epoch: 1,
       source: "voice",
       text: "x",
-      result: RESULT,
+      view: VIEW,
     };
     expect(
       reduceVoicePlan(confirming, { type: "confirm_failed", epoch: 1, message: "stale" }),
@@ -181,13 +192,13 @@ describe("stale async results cannot overwrite newer state", () => {
 
   it("a late proposal_ready after cancel is dropped — never silently shows a stale proposal", () => {
     const idle: VoicePlanState = { status: "idle", epoch: 3 };
-    const next = reduceVoicePlan(idle, { type: "proposal_ready", epoch: 2, result: RESULT });
+    const next = reduceVoicePlan(idle, { type: "proposal_ready", epoch: 2, view: VIEW });
     expect(next).toBe(idle);
   });
 
   it("a late proposal_ready after a fresh recording started is dropped, not merged into it", () => {
     const recording: VoicePlanState = { status: "recording", epoch: 3, transcript: "" };
-    const next = reduceVoicePlan(recording, { type: "proposal_ready", epoch: 2, result: RESULT });
+    const next = reduceVoicePlan(recording, { type: "proposal_ready", epoch: 2, view: VIEW });
     expect(next).toBe(recording);
   });
 
@@ -203,10 +214,81 @@ describe("stale async results cannot overwrite newer state", () => {
       epoch: 2,
       source: "voice",
       text: "x",
-      result: RESULT,
+      view: VIEW,
     };
     const next = reduceVoicePlan(confirming, { type: "confirm", epoch: 2 });
     expect(next).toBe(confirming);
+  });
+});
+
+describe("resuming a persisted proposal (Phase 5.5)", () => {
+  it("initialVoicePlanStateFor(null) is the ordinary idle start", () => {
+    expect(initialVoicePlanStateFor(null)).toEqual({ status: "idle", epoch: 0 });
+  });
+
+  it("initialVoicePlanStateFor(view) starts directly in proposal_ready, with no AI call implied", () => {
+    const state = initialVoicePlanStateFor(VIEW);
+    expect(state).toEqual({
+      status: "proposal_ready",
+      epoch: 0,
+      source: null,
+      text: null,
+      view: VIEW,
+    });
+  });
+
+  it("a resumed proposal reaches confirming/applied through the exact same events as a fresh one", () => {
+    let s = initialVoicePlanStateFor(VIEW);
+    s = reduceVoicePlan(s, { type: "confirm", epoch: 0 });
+    expect(s).toMatchObject({ status: "confirming", view: VIEW });
+    s = reduceVoicePlan(s, { type: "confirmed", epoch: 0, outcome: OUTCOME });
+    expect(s).toEqual({ status: "applied", epoch: 0, outcome: OUTCOME });
+  });
+});
+
+describe("confirm is refused for anything not fully valid or found stale (Phase 5.5)", () => {
+  it("refuses when status is partially_valid, even with an accepted change present", () => {
+    const ready: VoicePlanState = {
+      status: "proposal_ready",
+      epoch: 1,
+      source: "typed",
+      text: "x",
+      view: { ...VIEW, status: "partially_valid" },
+    };
+    expect(reduceVoicePlan(ready, { type: "confirm", epoch: 1 })).toBe(ready);
+  });
+
+  it("refuses when status is invalid", () => {
+    const ready: VoicePlanState = {
+      status: "proposal_ready",
+      epoch: 1,
+      source: "typed",
+      text: "x",
+      view: { ...VIEW, status: "invalid", accepted: [] },
+    };
+    expect(reduceVoicePlan(ready, { type: "confirm", epoch: 1 })).toBe(ready);
+  });
+
+  it("refuses a stale resumed proposal even though its own status is valid", () => {
+    const ready: VoicePlanState = {
+      status: "proposal_ready",
+      epoch: 1,
+      source: null,
+      text: null,
+      view: { ...VIEW, isStale: true },
+    };
+    expect(reduceVoicePlan(ready, { type: "confirm", epoch: 1 })).toBe(ready);
+  });
+
+  it("accepts when valid and not stale", () => {
+    const ready: VoicePlanState = {
+      status: "proposal_ready",
+      epoch: 1,
+      source: "typed",
+      text: "x",
+      view: VIEW,
+    };
+    expect(reduceVoicePlan(ready, { type: "confirm", epoch: 1 }).status).toBe("confirming");
   });
 });
 
@@ -256,7 +338,7 @@ describe("cannot skip the confirmation step", () => {
       { status: "idle", epoch: 1 } as const,
       { status: "transcript_review", epoch: 1, source: "voice", text: "x" } as const,
       { status: "generating", epoch: 1, source: "voice", text: "x" } as const,
-      { status: "proposal_ready", epoch: 1, source: "voice", text: "x", result: RESULT } as const,
+      { status: "proposal_ready", epoch: 1, source: "voice", text: "x", view: VIEW } as const,
     ]) {
       expect(reduceVoicePlan(state, { type: "confirmed", epoch: 1, outcome: OUTCOME })).toBe(state);
     }

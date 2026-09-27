@@ -414,10 +414,10 @@ Voice is an input modality, never a mutation authority. It produces text for a h
 ```
 voice → transcript (live, in the browser) → user reviews/edits it
      → UserIntent(source="voice")                      ── identical to typed input from here on
-     → generateAiProposal()   (Phase 5.2, unchanged)
+     → generateAiProposal()   (Phase 5.2, unchanged) → persists a snapshot (Phase 5.5, below)
      → deterministic validation (Phase 5.0, unchanged)
-     → human reviews the proposal, presses Apply
-     → confirmAiProposal()   (Phase 5.3, unchanged)
+     → human reviews the proposal (now resumable — Phase 5.5), presses Apply
+     → confirmPersistedAiProposal()   (Phase 5.5, composes the unchanged Phase 5.3 RPC)
      → the existing atomic confirmation RPC
 ```
 
@@ -427,8 +427,44 @@ voice → transcript (live, in the browser) → user reviews/edits it
 - **Stale results can't land.** Every state carries an `epoch`; starting a new recording, cancelling, or resetting mints a new one, and an event tagged with any other epoch is dropped by the reducer. A transcription or a proposal that resolves after the user cancelled, or after a newer recording started, is simply ignored — never merged into current state, never silently applied.
 - **The same pipeline, not a second one.** `use-ai-plan-flow.ts` calls the exact `generateAiProposalAction`/`confirmAiProposalAction` Server Actions (new in 5.4, but thin wrappers with no logic of their own — see `src/features/dashboard/ai-planning/actions.ts`) regardless of `source`; there is no voice-specific proposal schema, movability rule, or mutation path. A voice-sourced request is rejected by exactly the same deterministic rules as typed text (duration changes, locked/resolved/in-progress tasks, conflicts, …), because validation never looks at `source` at all.
 - **Privacy/logging.** `transcript` and `audio` were added to the structured logger's key-based redaction (`src/server/logging/redact.ts`), alongside the existing `prompt`/`completion` from Phase 5.1. Nothing in the voice or AI-planning UI logs at all in normal operation; this is defense in depth for the logger itself.
-- **No migration, no persistence.** Nothing about audio, transcripts, or voice sessions is stored; the flow is entirely in-memory until the user explicitly applies a proposal, at which point only the resulting task changes are written — the same as if they had typed the request.
-- **The AI proposal review UI itself is new in this phase** (`src/features/dashboard/ai-planning/ai-plan-dialog.tsx`, opened from a "Ask AI" button next to "Add task"): neither a UI nor a Server Action for Phase 5.2/5.3 existed before 5.4, so this phase built the minimal shared version both input modes need, rather than voice having nowhere to go.
+- **No audio persistence, ever** — unchanged by Phase 5.5, below: nothing about raw audio or a voice session is stored, only ever the resulting text, and only once the user explicitly generates a plan from it.
+- **The AI proposal review UI itself was new in this phase** (`src/features/dashboard/ai-planning/ai-plan-dialog.tsx`, opened from a "Ask AI" button next to "Add task"): neither a UI nor a Server Action for Phase 5.2/5.3 existed before 5.4, so this phase built the minimal shared version both input modes need, rather than voice having nowhere to go. Phase 5.5, below, makes the proposal it produces persistent and resumable.
+
+#### Phase 5.5: persistent AI proposals + resumable, replay-safe confirmation
+
+A generated proposal is now an immutable, persisted snapshot — "the AI proposed THIS against plan revision X" — not a live view of current state, and not confirmable through any path that lets a caller supply its own day/revision/changes. The canonical flow:
+
+```
+UserIntent → generateAiProposal() → deterministic validation (Phase 5.0/5.2, unchanged)
+  → create_ai_proposal()            [new, SECURITY DEFINER] persists the snapshot, atomically
+                                      superseding any earlier pending proposal for that day
+  → { proposalId, understood, unresolved, validation }        ── returned, nothing applied yet
+
+refresh/navigation → loadPendingAiProposal(planningDate) → the day's pending proposal (if any),
+                      with a live isStale check — reconstructs the review UI, no AI call
+
+user presses Apply → confirmPersistedAiProposal({ proposalId })
+  → confirm_ai_proposal_by_id()     [new, SECURITY DEFINER] locks the proposal row, requires
+                                      status='generated' AND validation_status='valid', reads
+                                      day_id/base_revision/changes FROM THE ROW (never the
+                                      caller), calls the UNCHANGED Phase 5.3 confirm_ai_proposal()
+                                      in the SAME transaction, then marks the row confirmed
+  → one atomic transaction: task mutation + history + revision + "proposal confirmed" together
+```
+
+- **Schema (`supabase/migrations/20260929090000_phase55_persist_ai_proposals.sql`):** one new table, `ai_proposals` — RLS enabled, `authenticated` has `SELECT` only (owner-scoped), zero direct INSERT/UPDATE/DELETE grants, all writes through three new SECURITY DEFINER RPCs (`create_ai_proposal`, `confirm_ai_proposal_by_id`, `discard_ai_proposal`) — the same posture `tasks`/`days`/`plans`/`plan_revisions` have had since 4.1b. `task_history.source`/`plan_revisions.source` already accept `'ai'` (Phase 5.3); nothing there changed.
+- **`confirm_ai_proposal()` (Phase 5.3) is untouched, byte-for-byte.** `confirm_ai_proposal_by_id()` composes it — calls it directly, in SQL, in the same transaction — rather than duplicating or modifying it, so its entire existing test suite and scratch-SQL verification remain valid evidence for this path too.
+- **Replay protection is the row lock, not a separate mechanism.** `confirm_ai_proposal_by_id()` locks the proposal row (`for update`) and requires `status = 'generated'` before doing anything; a second concurrent confirm of the same id blocks on that lock, then finds the row already `confirmed` and is refused. No idempotency table, no client-supplied nonce.
+- **Atomicity.** Locking the row, calling the unchanged confirmation RPC, and marking the row confirmed all happen in one PL/pgSQL call = one transaction: if the inner call raises (stale revision, an ineligible task, a conflict, malformed input), everything — including the row lock and the status update — rolls back, and the proposal is left exactly as it was (still `generated`, confirmable again after a fresh check). "Proposal confirmed" and "tasks changed" cannot disagree.
+- **Ref vs. `task_id`, unchanged from 5.3.** The stored `changes` column is the exact confirm wire shape (`ref`, `task_id`, `type`, `new_start`); `ref` is carried only for audit/display, never resolved back to a task — see the migration for why rebuilding aliases at confirm time is unsound.
+- **`validation_status` is enforced in SQL, not only by a disabled Apply button.** `confirm_ai_proposal_by_id()` refuses to confirm anything whose stored `validation_status` isn't `'valid'`, even if `changes` happens to be non-empty (a `partially_valid` proposal can have real accepted changes a human hasn't approved as a whole).
+- **One pending proposal per day, enforced by a partial unique index** (`ai_proposals_one_pending_per_day`), not application code. `create_ai_proposal()` atomically supersedes (discards) any earlier pending proposal for the day before inserting the new one.
+- **Staleness is never stored.** Whether a resumed proposal is stale is a live comparison, at read time, between its `base_revision` and the day's current plan revision (`loadPendingAiProposal`) — there is no `stale` status and no background job to keep one honest. The SQL confirmation path re-derives the same fact independently regardless of what the UI displays.
+- **The transcript is stored** (`ai_proposals.transcript_text`), deliberately — a resumed proposal needs to show what it was generated from without another AI call. It is owner-scoped by RLS like the rest of the row, and named so the existing "any key containing `transcript`" log-redaction rule (Phase 5.4) already masks it.
+- **Voice/typed parity, unchanged.** One `source` column, reused from `IntentSource`; nothing in the persistence path branches on it.
+- **UI (`src/features/dashboard/ai-planning/`):** `ai-plan-dialog.tsx`/`use-ai-plan-flow.ts` now accept a `resumedProposal` and start directly in `proposal_ready` when one exists (via `flow-state.ts`'s `initialVoicePlanStateFor`, a plain function, not a reducer transition — resuming is what the page start looks like, not something that happens in response to an event). `proposal-view.ts` is a small pure mapper so the review screen renders identically regardless of whether a proposal came from a fresh generation (in-memory, full `ValidatedChange` fidelity) or a resumed read (from `ai_proposals`, missing only the free-text `reason` per change). Cancelling a pending, persisted proposal calls `discardAiProposalAction` (fire-and-forget).
+- **Old ephemeral confirm path kept, but no longer reachable from a Server Action.** `confirmAiProposal(rawInput: {planningDate, baseRevision, changes})` (Phase 5.3) still exists in `server/services/ai-confirmation.ts`, still fully re-validated in SQL, but its Server Action was removed — an unused Action is still a reachable endpoint, and the app's real confirmation path is now exclusively proposal-id-based, which also removes the surface for a client to supply a different `base_revision`/`changes` than what was actually generated.
+- **Not built:** editing a proposal in place (the user regenerates instead), multiple simultaneous pending proposals, and any background job.
 
 ### Timezone strategy
 
