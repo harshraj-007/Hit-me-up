@@ -1,5 +1,11 @@
+// `endpoint`/`p256dh`/`auth[-_]?key` (Phase 6.1): a Web Push subscription's own fields. None of
+// the existing patterns above happen to match them (a push "endpoint" isn't a "cookie" or a
+// "session", and `auth_key`/`authKey` isn't a substring of `authorization`), so they are named
+// explicitly here — the same reasoning as every other entry in this list: whatever a table's
+// columns are called, if they're sensitive, this regex needs to say so directly, not rely on
+// happening to already match.
 const SENSITIVE_KEY =
-  /(pass(word)?|secret|token|api[-_]?key|authorization|cookie|session|credential|service[-_]?role|jwt|email|phone|brain[-_]?dump|content|body|prompt|completion|transcript|audio)/i;
+  /(pass(word)?|secret|token|api[-_]?key|authorization|cookie|session|credential|service[-_]?role|jwt|email|phone|brain[-_]?dump|content|body|prompt|completion|transcript|audio|endpoint|p256dh|auth[-_]?key)/i;
 
 const SENSITIVE_VALUE: [RegExp, string][] = [
   [/sk-ant-[A-Za-z0-9_-]+/g, "[REDACTED]"],

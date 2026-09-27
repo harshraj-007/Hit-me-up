@@ -42,3 +42,18 @@ export function isSupabaseConfigured(): boolean {
     NEXT_PUBLIC_SUPABASE_ANON_KEY: process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY,
   }).success;
 }
+
+/**
+ * The VAPID public key for Web Push, or `null` if it isn't configured yet — safe to send to
+ * the browser (that is its entire purpose; the matching private key never leaves the server).
+ * Deliberately NOT part of `publicEnvSchema`: that schema throws when Supabase config is
+ * missing, and this value being unset must never break unrelated public config. Like
+ * `getAiConfig()`, this reads only its own variable and never throws; the "Enable
+ * notifications" UI treats `null` the same as an unsupported browser — the feature simply
+ * isn't available yet. Actual push delivery (which needs the matching private key) is a later
+ * Phase 6 step; Phase 6.1 only needs this to call `PushManager.subscribe()`.
+ */
+export function getVapidPublicKey(): string | null {
+  const value = process.env.NEXT_PUBLIC_VAPID_PUBLIC_KEY?.trim();
+  return value ? value : null;
+}

@@ -9,7 +9,15 @@ import { describe, expect, it } from "vitest";
  * runtime — this test fails at build time instead. It scans every non-test source file for a
  * `.from("<locked table>")` query chain that contains a write verb.
  */
-const LOCKED = ["days", "plans", "plan_revisions", "tasks", "task_history", "ai_proposals"];
+const LOCKED = [
+  "days",
+  "plans",
+  "plan_revisions",
+  "tasks",
+  "task_history",
+  "ai_proposals",
+  "push_subscriptions",
+];
 const WRITE = /\.(insert|upsert|update|delete)\s*\(/;
 const SRC = join(process.cwd(), "src");
 

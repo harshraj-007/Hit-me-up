@@ -61,4 +61,42 @@ describe("redact", () => {
     expect(out.audioDurationMs).toBe("[REDACTED]"); // "audio" alone is enough to mask the key
     expect((out.voice as Record<string, unknown>).transcript).toBe("[REDACTED]");
   });
+
+  it("masks Web Push subscription credentials by key, wherever they appear (Phase 6.1)", () => {
+    const out = redact({
+      endpoint: "https://fcm.googleapis.com/fcm/send/abc123",
+      p256dh: "BNcRdreALRFXTkOOUHK1EtK2wtaz5Ry4YfYCA",
+      auth_key: "tBHItJI5svbpez7KI4CCXg",
+      authKey: "tBHItJI5svbpez7KI4CCXg",
+      subscription: { endpoint: "nested", p256dh: "nested" },
+      userId: "u1",
+    }) as Record<string, unknown>;
+    expect(out.endpoint).toBe("[REDACTED]");
+    expect(out.p256dh).toBe("[REDACTED]");
+    expect(out.auth_key).toBe("[REDACTED]");
+    expect(out.authKey).toBe("[REDACTED]");
+    expect((out.subscription as Record<string, unknown>).endpoint).toBe("[REDACTED]");
+    expect((out.subscription as Record<string, unknown>).p256dh).toBe("[REDACTED]");
+    expect(out.userId).toBe("u1"); // an id is fine; the point is the credentials, not the row
+  });
+
+  it("redacts endpoint and p256dh even inside a raw, unnormalized browser subscription shape", () => {
+    // The browser's own PushSubscriptionJSON nests keys as `{ p256dh, auth }` — note `auth`,
+    // not this app's `authKey`. `endpoint`/`p256dh` are still caught by key name at any depth;
+    // a bare `auth` is NOT (it would also match "authorization"-family false positives if it
+    // were added, e.g. any unrelated "author" field), which is exactly why the application
+    // never logs this raw shape at all — `normalizeSubscription` (src/lib/push/push-client.ts)
+    // converts it to `{ endpoint, p256dh, authKey }` before it crosses any boundary, and
+    // `authKey`/`auth_key` ARE covered (see the test above). This test documents that residual
+    // gap deliberately, rather than leaving it undiscovered.
+    const rawBrowserShape = {
+      endpoint: "https://fcm.googleapis.com/fcm/send/abc123",
+      expirationTime: null,
+      keys: { p256dh: "P", auth: "A" },
+    };
+    const out = redact({ subscription: rawBrowserShape }) as Record<string, unknown>;
+    const nested = out.subscription as Record<string, unknown>;
+    expect(nested.endpoint).toBe("[REDACTED]");
+    expect((nested.keys as Record<string, unknown>).p256dh).toBe("[REDACTED]");
+  });
 });

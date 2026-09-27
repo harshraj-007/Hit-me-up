@@ -1,5 +1,6 @@
 import { LogOut } from "lucide-react";
 import { signOutAction } from "@/server/auth/actions";
+import { NotificationsControl } from "@/features/notifications/notifications-control";
 import { AppNav } from "./app-nav";
 import { TimezoneSync } from "./timezone-sync";
 
@@ -31,6 +32,9 @@ export function AppShell({
         <p className="mb-4 hidden px-3 text-sm font-semibold md:block">Hit me up</p>
         <AppNav />
         <div className="mt-auto hidden pt-4 md:block">
+          <div className="mb-2">
+            <NotificationsControl />
+          </div>
           {userEmail ? <p className="truncate px-3 text-xs text-muted">{userEmail}</p> : null}
           <form action={signOutAction}>
             <button

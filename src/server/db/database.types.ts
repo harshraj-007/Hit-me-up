@@ -243,6 +243,34 @@ export interface Database {
         };
         Relationships: [];
       };
+      push_subscriptions: {
+        Row: {
+          id: string;
+          user_id: string;
+          endpoint: string;
+          p256dh: string;
+          auth_key: string;
+          created_at: string;
+          last_seen_at: string;
+          revoked_at: string | null;
+        };
+        // Not used directly — every write goes through register_push_subscription() /
+        // revoke_push_subscription() (below), never .insert()/.update(). Shapes are still
+        // real, not `never`, for the same reason noted above.
+        Insert: {
+          user_id: string;
+          endpoint: string;
+          p256dh: string;
+          auth_key: string;
+        };
+        Update: {
+          p256dh?: string;
+          auth_key?: string;
+          last_seen_at?: string;
+          revoked_at?: string | null;
+        };
+        Relationships: [];
+      };
     };
     Views: Record<string, never>;
     Functions: {
@@ -330,6 +358,20 @@ export interface Database {
       discard_ai_proposal: {
         Args: {
           p_proposal_id: string;
+        };
+        Returns: undefined;
+      };
+      register_push_subscription: {
+        Args: {
+          p_endpoint: string;
+          p_p256dh: string;
+          p_auth_key: string;
+        };
+        Returns: Database["public"]["Tables"]["push_subscriptions"]["Row"];
+      };
+      revoke_push_subscription: {
+        Args: {
+          p_endpoint: string;
         };
         Returns: undefined;
       };
