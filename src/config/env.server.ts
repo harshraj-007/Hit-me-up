@@ -13,6 +13,10 @@ const serverEnvSchema = z.object({
   // route fails closed (401) whether it's merely unset or the caller got it wrong; neither is
   // ever distinguished externally (see getCronSecret()).
   CRON_SECRET: z.string().min(1).optional(),
+  // Phase 6.3: Web Push delivery. Server-only, like the AI keys — never read via getServerEnv()
+  // (see getWebPushConfig()); declared here only so the full server contract stays visible.
+  VAPID_PRIVATE_KEY: z.string().min(1).optional(),
+  VAPID_SUBJECT: z.string().min(1).optional(),
 });
 
 export type ServerEnv = z.infer<typeof serverEnvSchema> & PublicEnv;
@@ -85,4 +89,26 @@ export function getCronSecret(): string | null {
 export function getServiceRoleKey(): string | null {
   const value = process.env.SUPABASE_SERVICE_ROLE_KEY?.trim();
   return value ? value : null;
+}
+
+export interface WebPushConfig {
+  publicKey: string;
+  privateKey: string;
+  subject: string;
+}
+
+/**
+ * The full VAPID configuration Web Push delivery needs, or `null` unless ALL THREE of the
+ * public key (already client-safe since Phase 6.1 — `NEXT_PUBLIC_VAPID_PUBLIC_KEY`), the
+ * private key, and the subject are present — the same all-or-nothing posture `getAiConfig`
+ * uses, and for the same reason: a partial config is worse than none, since it would let the
+ * delivery service start up believing it can send and fail on the first real call instead.
+ * Reads its own variables directly, uncached, like `getCronSecret`/`getServiceRoleKey` — so
+ * tests can stub fake, non-production values freely between cases. Never throws.
+ */
+export function getWebPushConfig(): WebPushConfig | null {
+  const publicKey = process.env.NEXT_PUBLIC_VAPID_PUBLIC_KEY?.trim();
+  const privateKey = process.env.VAPID_PRIVATE_KEY?.trim();
+  const subject = process.env.VAPID_SUBJECT?.trim();
+  return publicKey && privateKey && subject ? { publicKey, privateKey, subject } : null;
 }

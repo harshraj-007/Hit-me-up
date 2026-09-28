@@ -9,6 +9,7 @@ import type { ConfirmationChange } from "@/domain/ai-planning";
 import type { ScheduleChange } from "@/domain/scheduling";
 import type { Task, TaskKind, TaskPriority, TaskSource, TaskStatus } from "@/domain/tasks";
 import type { SupabaseServerClient } from "../supabase-server";
+import type { SupabaseServiceRoleClient } from "../supabase-service-role";
 import type { Database } from "../database.types";
 
 type TaskRow = Database["public"]["Tables"]["tasks"]["Row"];
@@ -148,6 +149,28 @@ export async function getTaskById(
   const { data, error } = await supabase.from("tasks").select("*").eq("id", taskId).maybeSingle();
   if (error) throw new ExternalServiceError("supabase", { cause: error });
   return data ? mapTask(data) : null;
+}
+
+/**
+ * A task's title ONLY (Phase 6.3's Web Push payload builder — see
+ * `src/lib/notifications/task-reminder-payload.ts`) — deliberately not `getTaskById`, and not
+ * a service-role variant of it: the notification payload must never carry `notes` (an explicit
+ * security rule), and selecting only `title` here makes that structurally true rather than a
+ * discipline the payload builder has to remember to uphold. Takes the service-role client:
+ * there is no user session on the delivery path, and `notification.taskId`/`userId` (from the
+ * authoritative claimed row, never client input) are what establish which task this is.
+ */
+export async function getTaskTitleForDelivery(
+  supabase: SupabaseServiceRoleClient,
+  taskId: string,
+): Promise<string | null> {
+  const { data, error } = await supabase
+    .from("tasks")
+    .select("title")
+    .eq("id", taskId)
+    .maybeSingle();
+  if (error) throw new ExternalServiceError("supabase", { cause: error });
+  return data?.title ?? null;
 }
 
 /** Moves one unresolved task and pins it, atomically with its history row and a "user" plan

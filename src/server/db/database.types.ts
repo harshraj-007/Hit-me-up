@@ -422,6 +422,18 @@ export interface Database {
         /** The rows claimed THIS invocation only — not the whole table. */
         Returns: Database["public"]["Tables"]["scheduled_notifications"]["Row"][];
       };
+      mark_notification_sent: {
+        Args: {
+          p_notification_id: string;
+        };
+        Returns: undefined;
+      };
+      revoke_push_subscription_by_id: {
+        Args: {
+          p_subscription_id: string;
+        };
+        Returns: undefined;
+      };
     };
     Enums: Record<string, never>;
     CompositeTypes: Record<string, never>;

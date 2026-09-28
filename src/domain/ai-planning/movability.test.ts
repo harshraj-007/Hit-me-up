@@ -53,9 +53,9 @@ describe("the deterministic planner's rule is untouched", () => {
     const body = sql.slice(sql.indexOf("function public.apply_replan"));
     expect(body).toMatch(/and source = 'planner'/);
     // 6 from Phase 4/4.1/4.1b, Phase 5.3's confirm_ai_proposal, Phase 5.5's persisted-proposal
-    // RPCs, Phase 6.1's push_subscriptions RPCs, and Phase 6.2's scheduled_notifications
-    // reconcile/claim RPC — all new, separate functions; apply_replan() itself is untouched by
-    // any of them.
-    expect(fs.readdirSync(dir)).toHaveLength(10);
+    // RPCs, Phase 6.1's push_subscriptions RPCs, Phase 6.2's scheduled_notifications
+    // reconcile/claim RPC, and Phase 6.3's mark_notification_sent/revoke_push_subscription_by_id
+    // — all new, separate functions; apply_replan() itself is untouched by any of them.
+    expect(fs.readdirSync(dir)).toHaveLength(11);
   });
 });

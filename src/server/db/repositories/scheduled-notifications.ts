@@ -55,3 +55,23 @@ export async function reconcileAndClaimNotifications(
   if (error) throw new ExternalServiceError("supabase", { cause: error });
   return (data ?? []).map(mapRow);
 }
+
+/**
+ * The ONE terminal transition Phase 6.3 itself performs (`mark_notification_sent`) — called
+ * once a claimed notification had at least one successful Web Push provider acceptance. Every
+ * other outcome (no active subscriptions, all transient failures, all permanently invalid
+ * subscriptions) leaves the row `claimed` on purpose: Phase 6.2's own lease-recovery step
+ * already decides, on a later cron tick, whether to retry or give up — see the migration and
+ * PROJECT_ARCHITECTURE.md's Phase 6.3 section for why this needs no second attempt counter.
+ * Idempotent and silent on a foreign, missing, or already-resolved id, same as every other
+ * finalize/discard path in this codebase.
+ */
+export async function markNotificationSent(
+  supabase: SupabaseServiceRoleClient,
+  notificationId: string,
+): Promise<void> {
+  const { error } = await supabase.rpc("mark_notification_sent", {
+    p_notification_id: notificationId,
+  });
+  if (error) throw new ExternalServiceError("supabase", { cause: error });
+}

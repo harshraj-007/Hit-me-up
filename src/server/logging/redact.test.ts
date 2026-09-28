@@ -114,4 +114,38 @@ describe("redact", () => {
     expect(out.CRON_SECRET).toBe("[REDACTED]");
     expect(out.claimedCount).toBe(3); // operational metadata is fine — the point is the secrets
   });
+
+  it("masks the VAPID private key by key, but never the public one (Phase 6.3)", () => {
+    const out = redact({
+      VAPID_PRIVATE_KEY: "priv_secret",
+      privateKey: "priv_secret",
+      NEXT_PUBLIC_VAPID_PUBLIC_KEY: "pub_safe_to_log",
+      publicKey: "pub_safe_to_log",
+    }) as Record<string, unknown>;
+    expect(out.VAPID_PRIVATE_KEY).toBe("[REDACTED]");
+    expect(out.privateKey).toBe("[REDACTED]");
+    // The public key is deliberately NOT redacted — it's meant for the browser, not a secret.
+    expect(out.NEXT_PUBLIC_VAPID_PUBLIC_KEY).toBe("pub_safe_to_log");
+    expect(out.publicKey).toBe("pub_safe_to_log");
+  });
+
+  it("masks delivery-result metadata only where it's actually sensitive (Phase 6.3)", () => {
+    const out = redact({
+      notificationId: "n1",
+      taskId: "t1",
+      subscriptionId: "s1",
+      statusCode: 410,
+      attemptNumber: 2,
+      outcome: "permanently_invalid",
+    }) as Record<string, unknown>;
+    // None of these are secrets — ids, status codes and outcomes are safe operational metadata.
+    expect(out).toEqual({
+      notificationId: "n1",
+      taskId: "t1",
+      subscriptionId: "s1",
+      statusCode: 410,
+      attemptNumber: 2,
+      outcome: "permanently_invalid",
+    });
+  });
 });

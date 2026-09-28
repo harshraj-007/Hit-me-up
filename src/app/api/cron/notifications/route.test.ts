@@ -1,3 +1,5 @@
+import { readdirSync } from "node:fs";
+import path from "node:path";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("@/server/services/notification-scheduler", () => ({
@@ -38,16 +40,16 @@ describe("POST /api/cron/notifications", () => {
     expect(runNotificationScheduler).not.toHaveBeenCalled();
   });
 
-  it("invokes the scheduler and reports the claimed count on a correctly authorized request", async () => {
-    vi.mocked(runNotificationScheduler).mockResolvedValue({ claimedCount: 3 });
+  it("invokes the scheduler and reports both the claimed and delivered counts on a correctly authorized request", async () => {
+    vi.mocked(runNotificationScheduler).mockResolvedValue({ claimedCount: 3, deliveredCount: 2 });
     const res = await POST(request("Bearer the-real-secret"), {});
     expect(res.status).toBe(200);
-    await expect(res.json()).resolves.toEqual({ claimed: 3 });
+    await expect(res.json()).resolves.toEqual({ claimed: 3, delivered: 2 });
     expect(runNotificationScheduler).toHaveBeenCalledTimes(1);
   });
 
   it("is safe to invoke repeatedly — two authorized calls both succeed independently", async () => {
-    vi.mocked(runNotificationScheduler).mockResolvedValue({ claimedCount: 0 });
+    vi.mocked(runNotificationScheduler).mockResolvedValue({ claimedCount: 0, deliveredCount: 0 });
     await POST(request("Bearer the-real-secret"), {});
     await POST(request("Bearer the-real-secret"), {});
     expect(runNotificationScheduler).toHaveBeenCalledTimes(2);
@@ -57,5 +59,12 @@ describe("POST /api/cron/notifications", () => {
     const res = await POST(request("Bearer wrong"), {});
     const body = JSON.stringify(await res.json());
     expect(body).not.toContain("the-real-secret");
+  });
+});
+
+describe("no second cron endpoint exists for delivery", () => {
+  it("src/app/api/cron/ has exactly one route: notifications — Phase 6.3 extended it in place", () => {
+    const cronDir = path.resolve(import.meta.dirname, "..");
+    expect(readdirSync(cronDir)).toEqual(["notifications"]);
   });
 });

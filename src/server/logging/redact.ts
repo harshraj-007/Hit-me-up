@@ -4,8 +4,13 @@
 // explicitly here — the same reasoning as every other entry in this list: whatever a table's
 // columns are called, if they're sensitive, this regex needs to say so directly, not rely on
 // happening to already match.
+//
+// `private[-_]?key` (Phase 6.3): `VAPID_PRIVATE_KEY`/`privateKey` — the "key"/"api[-_]?key"
+// patterns above only ever matched API-key-shaped names, not "private key"; deliberately
+// narrow to "private" so the VAPID *public* key (`NEXT_PUBLIC_VAPID_PUBLIC_KEY`, safe to log —
+// it's meant for the browser) is never accidentally caught by a bare "key" pattern.
 const SENSITIVE_KEY =
-  /(pass(word)?|secret|token|api[-_]?key|authorization|cookie|session|credential|service[-_]?role|jwt|email|phone|brain[-_]?dump|content|body|prompt|completion|transcript|audio|endpoint|p256dh|auth[-_]?key)/i;
+  /(pass(word)?|secret|token|api[-_]?key|authorization|cookie|session|credential|service[-_]?role|jwt|email|phone|brain[-_]?dump|content|body|prompt|completion|transcript|audio|endpoint|p256dh|auth[-_]?key|private[-_]?key)/i;
 
 const SENSITIVE_VALUE: [RegExp, string][] = [
   [/sk-ant-[A-Za-z0-9_-]+/g, "[REDACTED]"],

@@ -1,6 +1,7 @@
 import "server-only";
 import { ExternalServiceError } from "@/server/errors";
 import type { SupabaseServerClient } from "../supabase-server";
+import type { SupabaseServiceRoleClient } from "../supabase-service-role";
 import type { Database } from "../database.types";
 
 type PushSubscriptionRow = Database["public"]["Tables"]["push_subscriptions"]["Row"];
@@ -78,5 +79,45 @@ export async function revokePushSubscription(
   endpoint: string,
 ): Promise<void> {
   const { error } = await supabase.rpc("revoke_push_subscription", { p_endpoint: endpoint });
+  if (error) throw new ExternalServiceError("supabase", { cause: error });
+}
+
+/**
+ * Every ACTIVE (`revoked_at is null`) subscription for a user — the system/delivery path's
+ * only read (Phase 6.3). Takes the service-role client deliberately: there is no user session
+ * on the cron/delivery path to scope a `SupabaseServerClient` read to, and this is the one
+ * place this repository crosses users on purpose — the delivery service is the trusted system
+ * boundary that fans a claimed notification out to its OWN user's devices, verified by
+ * `notification.userId`, never by anything a client supplied.
+ */
+export async function listActiveSubscriptionsForUser(
+  supabase: SupabaseServiceRoleClient,
+  userId: string,
+): Promise<PushSubscription[]> {
+  const { data, error } = await supabase
+    .from("push_subscriptions")
+    .select("*")
+    .eq("user_id", userId)
+    .is("revoked_at", null);
+  if (error) throw new ExternalServiceError("supabase", { cause: error });
+  return (data ?? []).map(mapRow);
+}
+
+/**
+ * The system-facing revocation path (`revoke_push_subscription_by_id`, Phase 6.3) — used only
+ * when the Web Push provider reports a subscription permanently gone (404/410). Unlike
+ * `revokePushSubscription` above, this is addressed by the subscription's own id (which
+ * delivery already has from `listActiveSubscriptionsForUser`) and authorized by the caller
+ * being the trusted service-role path, not by ownership — see the migration for why there is
+ * no ownership check to bypass here. Idempotent and silent on a foreign, missing, or
+ * already-revoked id, same as every other revoke/discard path in this codebase.
+ */
+export async function revokePushSubscriptionById(
+  supabase: SupabaseServiceRoleClient,
+  subscriptionId: string,
+): Promise<void> {
+  const { error } = await supabase.rpc("revoke_push_subscription_by_id", {
+    p_subscription_id: subscriptionId,
+  });
   if (error) throw new ExternalServiceError("supabase", { cause: error });
 }
