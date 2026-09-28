@@ -5,6 +5,7 @@ import {
   isPushSupported,
   normalizeSubscription,
   pushClientError,
+  registerServiceWorker,
   subscribeToPush,
   urlBase64ToUint8Array,
 } from "./push-client";
@@ -101,6 +102,26 @@ describe("pushClientError / isPushClientError", () => {
     expect(isPushClientError(null)).toBe(false);
     expect(isPushClientError("string")).toBe(false);
     expect(isPushClientError({ message: "no reason field" })).toBe(false);
+  });
+});
+
+describe("registerServiceWorker", () => {
+  it("does nothing when there is no navigator.serviceWorker at all", async () => {
+    await expect(registerServiceWorker()).resolves.toBeUndefined();
+  });
+
+  it("registers /sw.js when serviceWorker is supported", async () => {
+    const register = vi.fn(async () => ({}));
+    vi.stubGlobal("navigator", { serviceWorker: { register } });
+    await registerServiceWorker();
+    expect(register).toHaveBeenCalledExactlyOnceWith("/sw.js");
+  });
+
+  it("swallows a registration failure rather than throwing", async () => {
+    vi.stubGlobal("navigator", {
+      serviceWorker: { register: vi.fn(async () => Promise.reject(new Error("nope"))) },
+    });
+    await expect(registerServiceWorker()).resolves.toBeUndefined();
   });
 });
 

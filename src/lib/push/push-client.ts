@@ -6,13 +6,18 @@
  * inspection and end-to-end use), not by rendering it in a unit test — this project has no
  * React Testing Library dependency, by design.
  *
- * Phase 6.1 registers/revokes subscriptions only. It deliberately does NOT create a service
- * worker (that is a later Phase 6 step), so `getExistingSubscription`/`subscribeToPush` below
- * use `navigator.serviceWorker.getRegistration()` rather than `.ready` — `.ready` never
- * resolves until a worker exists, and would hang the "Enable notifications" flow indefinitely
- * on a page that has none yet. `getRegistration()` resolves to `undefined` instead, which this
- * module treats as a normal, honest "not available yet" outcome rather than a crash. Once a
- * later phase registers `public/sw.js`, this same code starts working without a rewrite.
+ * Phase 6.1 registers/revokes subscriptions only. It deliberately did NOT create a service
+ * worker itself, so `getExistingSubscription`/`subscribeToPush` below use
+ * `navigator.serviceWorker.getRegistration()` rather than `.ready` — `.ready` never resolves
+ * until a worker exists, and would hang the "Enable notifications" flow indefinitely on a page
+ * that has none yet. `getRegistration()` resolves to `undefined` instead, which this module
+ * treats as a normal, honest "not available yet" outcome rather than a crash.
+ *
+ * Phase 6.4 adds `public/sw.js` and, below, `registerServiceWorker()` — the minimum needed so
+ * `getRegistration()` actually has something to find. Registering a worker does not request
+ * notification permission and does not create a subscription; it only makes the worker
+ * available for later, explicit use, the same way it always could have if the file had existed
+ * since Phase 6.1.
  */
 
 export type PushClientErrorReason =
@@ -58,6 +63,24 @@ export function isPushClientError(value: unknown): value is PushClientError {
 export function isPushSupported(): boolean {
   if (typeof window === "undefined" || typeof navigator === "undefined") return false;
   return "serviceWorker" in navigator && "PushManager" in window && "Notification" in window;
+}
+
+/**
+ * Registers `public/sw.js`, if this browser supports service workers at all. This is the entire
+ * Phase 6.4 client integration: it does not request notification permission, does not create or
+ * touch a push subscription, and is safe to call on every load of a page that renders the
+ * notifications control — the browser itself no-ops a re-registration of an already-registered,
+ * unchanged worker. Failures are swallowed on purpose: the rest of this module already treats
+ * "no registration found" (`service_worker_unavailable`) as a normal, non-crashing outcome, so a
+ * registration failure here needs no separate error path of its own.
+ */
+export async function registerServiceWorker(): Promise<void> {
+  if (typeof navigator === "undefined" || !("serviceWorker" in navigator)) return;
+  try {
+    await navigator.serviceWorker.register("/sw.js");
+  } catch {
+    // Intentionally swallowed — see doc comment above.
+  }
 }
 
 /**

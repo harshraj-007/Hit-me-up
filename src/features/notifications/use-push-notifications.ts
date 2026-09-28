@@ -9,6 +9,7 @@ import {
   isPushSupported,
   normalizeSubscription,
   pushClientError,
+  registerServiceWorker,
   subscribeToPush,
 } from "@/lib/push/push-client";
 import { registerPushSubscriptionAction, revokePushSubscriptionAction } from "./actions";
@@ -45,10 +46,12 @@ export interface UsePushNotificationsResult {
  *   → obtain a PushManager subscription → register it with the server (Server Action)
  *   → later: revoke it, both server-side and at the browser level
  *
- * Phase 6.1 does not ship a service worker yet, so `subscribeToPush` and `getExistingSubscription`
- * (src/lib/push/push-client.ts) use `getRegistration()` rather than `.ready` and treat "no
- * worker registered" as a normal, non-crashing outcome (`service_worker_unavailable`) — once a
- * later phase adds `public/sw.js`, this hook starts completing the flow with no changes here.
+ * `subscribeToPush` and `getExistingSubscription` (src/lib/push/push-client.ts) use
+ * `getRegistration()` rather than `.ready` and treat "no worker registered" as a normal,
+ * non-crashing outcome (`service_worker_unavailable`). Phase 6.4 registers `public/sw.js` (see
+ * `registerServiceWorker()` below) so `getRegistration()` has something to find — registering
+ * does not itself request permission or create a subscription, both of which still only ever
+ * happen from `enable()`'s own click handler.
  *
  * This device's own subscription state is read straight from the browser (`getSubscription()`),
  * never from a server round trip: the browser is already the source of truth for "does THIS
@@ -65,6 +68,7 @@ export function usePushNotifications(): UsePushNotificationsResult {
         if (!cancelled) setState("unsupported");
         return;
       }
+      await registerServiceWorker();
       if (!getVapidPublicKey()) {
         if (!cancelled) setState("not_configured");
         return;
