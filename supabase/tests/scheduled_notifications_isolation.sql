@@ -428,13 +428,19 @@ declare v_task_count_before int; v_history_count_before int;
         v_task_count_after int; v_history_count_after int;
         v_task_snapshot record;
 begin
+  -- The OBSERVATION of task_history needs a superuser: service_role (who runs the reconcile
+  -- below) deliberately has no privilege on it (see the Phase 6 service_role hardening
+  -- migration). The reconcile call itself still runs as service_role.
+  execute 'reset role';
   select count(*) into v_task_count_before from public.tasks;
   select count(*) into v_history_count_before from public.task_history;
   select updated_at, status, scheduled_start into v_task_snapshot
     from public.tasks where title = 'due later';
+  execute 'set local role service_role';
 
   perform public.reconcile_and_claim_notifications();
 
+  execute 'reset role';
   select count(*) into v_task_count_after from public.tasks;
   select count(*) into v_history_count_after from public.task_history;
   if v_task_count_before <> v_task_count_after or v_history_count_before <> v_history_count_after then
@@ -444,6 +450,7 @@ begin
      is distinct from (v_task_snapshot.updated_at, v_task_snapshot.status, v_task_snapshot.scheduled_start) then
     raise exception 'CASE 26 FAILED: reconciliation mutated a task row';
   end if;
+  execute 'set local role service_role';
 end $$;
 do $$ begin raise notice 'CASE 26: reconciliation never mutates tasks or task_history — OK'; end $$;
 
