@@ -5,33 +5,23 @@ import { useToast } from "@/components/ui/toast-provider";
 import { getVapidPublicKey } from "@/config/env.public";
 import {
   getExistingSubscription,
-  isPushClientError,
   isPushSupported,
   normalizeSubscription,
-  pushClientError,
   registerServiceWorker,
   subscribeToPush,
 } from "@/lib/push/push-client";
+import {
+  canStartDisable,
+  canStartEnable,
+  runDisableFlow,
+  runEnableFlow,
+  stateAfterDisable,
+  stateAfterMountCheck,
+  type PushNotificationsState,
+} from "./push-notification-flow";
 import { registerPushSubscriptionAction, revokePushSubscriptionAction } from "./actions";
 
-export type PushNotificationsState =
-  /** Still inspecting the browser on mount — render nothing rather than flash a wrong state. */
-  | "checking"
-  /** No ServiceWorker/PushManager/Notification API, or not a secure context. Hidden, not an
-   *  error: most users on an unsupported browser should never see this feature at all. */
-  | "unsupported"
-  /** Supported, but the server hasn't configured a VAPID key yet (a later Phase 6 step). Same
-   *  user-facing treatment as "unsupported" — the feature genuinely isn't available yet. */
-  | "not_configured"
-  /** The user (or their browser policy) has explicitly refused permission. Browsers will not
-   *  re-prompt, so there is nothing to offer here except an explanation. */
-  | "denied"
-  /** Permission is grantable (or already granted) but this device has no active subscription. */
-  | "off"
-  | "subscribing"
-  /** This device has an active subscription registered with the server. */
-  | "on"
-  | "revoking";
+export type { PushNotificationsState };
 
 export interface UsePushNotificationsResult {
   state: PushNotificationsState;
@@ -40,22 +30,25 @@ export interface UsePushNotificationsResult {
 }
 
 /**
- * Drives the "Enable notifications" control end to end for THIS browser/device:
+ * Drives the "Enable notifications" control end to end for THIS browser/device. This hook is a
+ * thin React wrapper — every actual decision (what state a mount observation implies, whether a
+ * click is allowed to start something, what an enable/disable attempt's outcome means) lives in
+ * `push-notification-flow.ts`, a plain, dependency-injected module with no React and no browser
+ * API of its own, unit-tested directly. This mirrors how `use-ai-plan-flow.ts` relates to
+ * `flow-state.ts`: this hook itself is verified by inspection/e2e, not a unit test, consistent
+ * with this project having no React Testing Library dependency.
  *
- *   detect support → request permission (only on explicit click, never on mount)
- *   → obtain a PushManager subscription → register it with the server (Server Action)
- *   → later: revoke it, both server-side and at the browser level
- *
- * `subscribeToPush` and `getExistingSubscription` (src/lib/push/push-client.ts) use
- * `getRegistration()` rather than `.ready` and treat "no worker registered" as a normal,
- * non-crashing outcome (`service_worker_unavailable`). Phase 6.4 registers `public/sw.js` (see
- * `registerServiceWorker()` below) so `getRegistration()` has something to find — registering
- * does not itself request permission or create a subscription, both of which still only ever
- * happen from `enable()`'s own click handler.
+ *   mount: detect support → ensure a worker is registered → read (never request) permission
+ *          → read this device's existing subscription, if any → derive the starting state
+ *   click "Enable": request permission (ONLY now) → ensure worker → obtain/reuse subscription
+ *          → register it with the server (Server Action) → enabled only once that succeeds
+ *   click "Turn off": revoke server-side → unsubscribe in the browser
  *
  * This device's own subscription state is read straight from the browser (`getSubscription()`),
- * never from a server round trip: the browser is already the source of truth for "does THIS
- * device hold an active subscription", so no read endpoint is needed for that in Phase 6.1.
+ * never from a server round trip — the browser is already the source of truth for "does THIS
+ * device hold an active subscription" (Phase 6.1). The server remains the sole authority for
+ * whether a subscription is actually *registered*: `enabled` is never set until
+ * `registerPushSubscriptionAction` itself has returned success.
  */
 export function usePushNotifications(): UsePushNotificationsResult {
   const { toast } = useToast();
@@ -64,21 +57,32 @@ export function usePushNotifications(): UsePushNotificationsResult {
   useEffect(() => {
     let cancelled = false;
     void (async () => {
-      if (!isPushSupported()) {
+      const supported = isPushSupported();
+      if (!supported) {
         if (!cancelled) setState("unsupported");
         return;
       }
+      // Registering here is not itself part of the explicit enable flow's own guarantee (that
+      // one re-ensures registration too, see `subscribeToPush`) — it just means the worker is
+      // already available by the time `getExistingSubscription()` below needs it, and by the
+      // time the button below is even interactive (this effect hasn't set a clickable state yet).
       await registerServiceWorker();
-      if (!getVapidPublicKey()) {
-        if (!cancelled) setState("not_configured");
-        return;
-      }
-      if (typeof Notification !== "undefined" && Notification.permission === "denied") {
-        if (!cancelled) setState("denied");
-        return;
-      }
+
+      const vapidPublicKey = getVapidPublicKey();
+      const permission: NotificationPermission =
+        typeof Notification !== "undefined" ? Notification.permission : "denied";
       const subscription = await getExistingSubscription().catch(() => null);
-      if (!cancelled) setState(subscription ? "on" : "off");
+
+      if (!cancelled) {
+        setState(
+          stateAfterMountCheck({
+            supported,
+            vapidConfigured: Boolean(vapidPublicKey),
+            permission,
+            hasExistingSubscription: subscription !== null,
+          }),
+        );
+      }
     })();
     return () => {
       cancelled = true;
@@ -91,56 +95,54 @@ export function usePushNotifications(): UsePushNotificationsResult {
   );
 
   const enable = useCallback(() => {
+    if (!canStartEnable(state)) return; // duplicate click, or a state this control can't start from.
     const vapidPublicKey = getVapidPublicKey();
     if (!vapidPublicKey) {
       setState("not_configured");
       return;
     }
-    setState("subscribing");
     void (async () => {
-      try {
-        const subscription = await subscribeToPush(vapidPublicKey);
-        const normalized = normalizeSubscription(subscription);
-        const result = await registerPushSubscriptionAction(normalized);
-        if (!result.ok) {
-          showError(result.error.message);
-          setState("off");
-          return;
-        }
-        setState("on");
-      } catch (error) {
-        if (isPushClientError(error)) {
-          showError(error.message);
-          setState(error.reason === "permission_denied" ? "denied" : "off");
-          return;
-        }
-        showError(pushClientError("subscribe_failed").message);
-        setState("off");
+      const outcome = await runEnableFlow(
+        vapidPublicKey,
+        { subscribeToPush, normalizeSubscription, registerPushSubscriptionAction },
+        (phase) => setState(phase),
+      );
+      if (outcome.kind === "enabled") {
+        setState("enabled");
+        return;
       }
+      showError(outcome.message);
+      // A denied permission gets its own explanatory state (no retry control shown); every
+      // other recoverable failure lands on `error`, which — unlike `permission_denied` — the
+      // user can retry from.
+      setState(outcome.kind === "permission_denied" ? "permission_denied" : "error");
     })();
-  }, [showError]);
+  }, [state, showError]);
 
   const disable = useCallback(() => {
+    if (!canStartDisable(state)) return;
     setState("revoking");
     void (async () => {
-      try {
-        const subscription = await getExistingSubscription();
-        if (subscription) {
-          const result = await revokePushSubscriptionAction({ endpoint: subscription.endpoint });
-          if (!result.ok) {
-            showError(result.error.message);
-            setState("on");
-            return;
-          }
-          await subscription.unsubscribe();
-        }
-        setState("off");
-      } catch {
-        showError(pushClientError("revoke_failed").message);
-        setState("on");
+      const outcome = await runDisableFlow({
+        getExistingSubscription,
+        revokePushSubscriptionAction,
+      });
+      if (outcome.kind === "disabled") {
+        // Revoking a subscription does not revoke the browser permission — read (never request)
+        // what it is now to pick the right resting state.
+        setState(
+          stateAfterDisable(
+            typeof Notification !== "undefined" ? Notification.permission : "default",
+          ),
+        );
+        return;
       }
+      showError(outcome.message);
+      // The subscription is still active server-side (the revoke itself failed) — showing
+      // anything but `enabled` here would falsely claim notifications are off.
+      setState("enabled");
     })();
-  }, [showError]);
+  }, [state, showError]);
 
   return { state, enable, disable };
 }

@@ -136,13 +136,27 @@ export async function getExistingSubscription(): Promise<PushSubscription | null
  * Requests permission (must be called from a real user gesture — this module never calls it on
  * its own) and, once granted, obtains a `PushSubscription` for the given VAPID public key.
  * Reuses an existing subscription if one is already active, rather than minting a new endpoint
- * on every call.
+ * on every call. `Notification.requestPermission()` is deliberately the very first thing this
+ * function does, with nothing awaited before it — Safari and other strict browsers require a
+ * permission prompt to be requested with the click's own "user activation" still fresh, and an
+ * `await` inserted before this call (e.g. re-registering the service worker first) risks losing
+ * that and silently failing to prompt at all. Anything else this function needs (ensuring a
+ * worker is registered) happens only AFTER permission is already confirmed granted, where that
+ * risk does not apply.
  */
 export async function subscribeToPush(vapidPublicKey: string): Promise<PushSubscription> {
   const permission = await Notification.requestPermission();
   if (permission !== "granted") throw pushClientError("permission_denied");
 
-  const registration = await navigator.serviceWorker.getRegistration();
+  let registration = await navigator.serviceWorker.getRegistration();
+  if (!registration) {
+    // The mount-time registration (`registerServiceWorker()`, called once when this hook's
+    // control first mounts) should already have done this — this is a defensive retry for the
+    // rare case that call hasn't resolved yet, or silently failed. Safe to attempt again:
+    // registering an already-registered, unchanged worker is a cheap no-op to the browser.
+    await registerServiceWorker();
+    registration = await navigator.serviceWorker.getRegistration();
+  }
   if (!registration) throw pushClientError("service_worker_unavailable");
 
   const existing = await registration.pushManager.getSubscription();

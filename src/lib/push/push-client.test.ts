@@ -174,10 +174,77 @@ describe("subscribeToPush", () => {
     expect(isPushClientError(error) && error.reason).toBe("permission_denied");
   });
 
-  it("throws service_worker_unavailable when permission is granted but no worker is registered", async () => {
+  it("throws service_worker_unavailable when permission is granted but no worker is registered, even after retrying registration", async () => {
+    // No `register` on this stub at all — the internal retry-registration attempt must fail
+    // softly (swallowed by `registerServiceWorker`), not throw uncaught.
     stubSupported({ registration: undefined });
     const error = await subscribeToPush("vapid-key").catch((e: unknown) => e);
     expect(isPushClientError(error) && error.reason).toBe("service_worker_unavailable");
+  });
+
+  it("retries service-worker registration once, after permission, if no registration is found yet — and succeeds if one appears", async () => {
+    // Simulates the mount-time `registerServiceWorker()` call not having resolved yet: the
+    // first `getRegistration()` finds nothing, `subscribeToPush` registers again, and the
+    // second `getRegistration()` finds the now-registered worker.
+    const register = vi.fn(async () => ({}));
+    let calls = 0;
+    const getRegistration = vi.fn(async () => {
+      calls += 1;
+      if (calls === 1) return undefined;
+      return {
+        pushManager: {
+          getSubscription: vi.fn(async () => undefined),
+          subscribe: vi.fn(async () => fakeSubscription({ endpoint: "new" })),
+        },
+      };
+    });
+    vi.stubGlobal("window", { PushManager: class {}, Notification: class {} });
+    vi.stubGlobal("navigator", { serviceWorker: { getRegistration, register } });
+    vi.stubGlobal("Notification", { requestPermission: vi.fn(async () => "granted") });
+
+    await expect(subscribeToPush("SGVsbG8")).resolves.toBeDefined();
+    expect(register).toHaveBeenCalledExactlyOnceWith("/sw.js");
+    expect(getRegistration).toHaveBeenCalledTimes(2);
+  });
+
+  it("requests permission before ever touching service-worker registration (preserves user-gesture timing)", async () => {
+    const order: string[] = [];
+    const requestPermission = vi.fn(async (): Promise<NotificationPermission> => {
+      order.push("requestPermission");
+      return "granted";
+    });
+    const getRegistration = vi.fn(async () => {
+      order.push("getRegistration");
+      return {
+        pushManager: {
+          getSubscription: vi.fn(async () => fakeSubscription({ endpoint: "e" })),
+          subscribe: vi.fn(),
+        },
+      };
+    });
+    vi.stubGlobal("window", { PushManager: class {}, Notification: class {} });
+    vi.stubGlobal("navigator", { serviceWorker: { getRegistration, register: vi.fn() } });
+    vi.stubGlobal("Notification", { requestPermission });
+
+    await subscribeToPush("vapid-key");
+    expect(order).toEqual(["requestPermission", "getRegistration"]);
+  });
+
+  it("does not retry registration at all when one is already found on the first check", async () => {
+    const register = vi.fn();
+    const getRegistration = vi.fn(async () => ({
+      pushManager: {
+        getSubscription: vi.fn(async () => fakeSubscription({ endpoint: "e" })),
+        subscribe: vi.fn(),
+      },
+    }));
+    vi.stubGlobal("window", { PushManager: class {}, Notification: class {} });
+    vi.stubGlobal("navigator", { serviceWorker: { getRegistration, register } });
+    vi.stubGlobal("Notification", { requestPermission: vi.fn(async () => "granted") });
+
+    await subscribeToPush("vapid-key");
+    expect(register).not.toHaveBeenCalled();
+    expect(getRegistration).toHaveBeenCalledTimes(1);
   });
 
   it("reuses an existing subscription instead of subscribing again", async () => {
