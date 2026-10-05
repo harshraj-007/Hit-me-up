@@ -49,7 +49,8 @@ export interface TaskHistoryEntry {
   event: "created" | "status_changed" | "rescheduled" | "replanned";
   previousStatus: TaskStatus | null;
   newStatus: TaskStatus;
-  source: "user" | "system";
+  /** `ai` since Phase 5.3: a change applied by confirming an AI proposal. */
+  source: "user" | "system" | "ai";
   previousStart: Date | null;
   previousEnd: Date | null;
   newStart: Date | null;

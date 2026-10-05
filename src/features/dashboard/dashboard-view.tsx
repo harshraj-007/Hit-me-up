@@ -14,8 +14,10 @@ import { AddTaskDialog } from "./add-task-dialog";
 import { BriefingPanel } from "./briefing-panel";
 import { DashboardHeader } from "./dashboard-header";
 import { DayNav } from "./day-nav";
+import { EodPanel } from "./eod/eod-panel";
 import { toDashboardTask } from "./map-task";
 import { RescheduleDialog } from "./reschedule-dialog";
+import type { EodReportView } from "@/domain/eod";
 import { AiPlanDialog } from "./ai-planning/ai-plan-dialog";
 import type { ProposalView } from "./ai-planning/proposal-view";
 import { computeRemainingMinutes } from "./summary";
@@ -43,6 +45,8 @@ export interface DashboardViewProps {
   initialNow: Date;
   /** A pending AI proposal the server already found for this day (Phase 5.5 resume), or null. */
   initialPendingAiProposal: ProposalView | null;
+  /** Today's saved end-of-day review, if one was written (Phase 7); always null for a future day. */
+  initialEodReport: EodReportView | null;
 }
 
 /**
@@ -68,6 +72,7 @@ export function DashboardView({
   initialBriefingText,
   initialNow,
   initialPendingAiProposal,
+  initialEodReport,
 }: DashboardViewProps) {
   const [tasks, setTasks] = useState<Task[]>(initialTasks);
   const [spillover, setSpillover] = useState<Task[]>(initialSpillover);
@@ -359,6 +364,9 @@ export function DashboardView({
       ) : (
         <div className="flex flex-col gap-6">{timeline}</div>
       )}
+
+      {/* Only today can be reviewed; a future day has nothing to wrap up yet. */}
+      {isToday ? <EodPanel initialView={initialEodReport} dayExists={dayExists} /> : null}
 
       <AddTaskDialog
         open={addOpen}

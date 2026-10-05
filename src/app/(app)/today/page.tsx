@@ -60,6 +60,7 @@ export default async function TodayPage({
             )
           : null
       }
+      initialEodReport={snapshot.eodReport}
     />
   );
 }

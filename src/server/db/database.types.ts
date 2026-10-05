@@ -247,6 +247,34 @@ export interface Database {
         };
         Relationships: [];
       };
+      eod_reports: {
+        Row: {
+          id: string;
+          user_id: string;
+          day_id: string;
+          state_fingerprint: string;
+          prompt_version: string;
+          /** jsonb — re-parsed with storedEodFactsSchema on every read. */
+          facts: unknown;
+          /** jsonb — re-parsed with storedEodInterpretationSchema on every read. */
+          interpretation: unknown;
+          created_at: string;
+        };
+        // Not used directly — the only writer is create_eod_report() (below), never .insert()/
+        // .update()/.delete(). Shapes are still real, not `never`, for the same reason noted above.
+        Insert: {
+          user_id: string;
+          day_id: string;
+          state_fingerprint: string;
+          prompt_version: string;
+          facts: unknown;
+          interpretation: unknown;
+        };
+        Update: {
+          prompt_version?: string;
+        };
+        Relationships: [];
+      };
       push_subscriptions: {
         Row: {
           id: string;
@@ -389,6 +417,20 @@ export interface Database {
           p_validation_status: AiProposalValidationStatusColumn;
         };
         Returns: Database["public"]["Tables"]["ai_proposals"]["Row"];
+      };
+      create_eod_report: {
+        Args: {
+          p_day_id: string;
+          /** sha-256 hex of the persisted task state the report was written against. */
+          p_state_fingerprint: string;
+          p_prompt_version: string;
+          /** The deterministic EodFacts (see domain/eod/types.ts). */
+          p_facts: unknown;
+          /** The validated EodInterpretation. */
+          p_interpretation: unknown;
+        };
+        /** The new row — or, on an exact replay of the same day-state, the existing one. */
+        Returns: Database["public"]["Tables"]["eod_reports"]["Row"];
       };
       confirm_ai_proposal_by_id: {
         Args: {

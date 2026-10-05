@@ -57,7 +57,8 @@ describe("the deterministic planner's rule is untouched", () => {
     // reconcile/claim RPC, and Phase 6.3's mark_notification_sent/revoke_push_subscription_by_id
     // — all new, separate functions; apply_replan() itself is untouched by any of them — plus
     // the two Phase 6 live-verification follow-ups (service_role grant hardening; the overlapping-
-    // cron creation race), which only revoke privileges / re-declare the reconcile function.
-    expect(fs.readdirSync(dir)).toHaveLength(13);
+    // cron creation race), which only revoke privileges / re-declare the reconcile function, and
+    // Phase 7's eod_reports table + create_eod_report() — all new objects.
+    expect(fs.readdirSync(dir)).toHaveLength(14);
   });
 });

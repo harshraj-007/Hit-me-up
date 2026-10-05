@@ -201,6 +201,22 @@ dialog[open]::backdrop {
   transform: translateY(0) scale(1);
 }
 
+/* End-of-day review reveal: a trivial one-shot fade, so plain CSS (no GSAP/Anime). The reduced-
+   motion block below neutralises it. */
+@keyframes eod-reveal {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+.eod-reveal {
+  animation: eod-reveal 220ms ease-out both;
+}
+
 /* Safety net: CSS transitions/animations are neutralised; JS motion goes through
    src/lib/motion, which checks the same media feature before animating. */
 @media (prefers-reduced-motion: reduce) {

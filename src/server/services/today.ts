@@ -7,8 +7,10 @@ import { findPendingProposal } from "@/server/db/repositories/ai-proposals";
 import { getLatestRevisionNumber } from "@/server/db/repositories/plans";
 import { getLatestBriefing } from "@/server/db/repositories/briefings";
 import type { Task } from "@/domain/tasks";
+import type { EodReportView } from "@/domain/eod";
 import type { AiProposal } from "@/server/db/repositories/ai-proposals";
 import { findCurrentDay, todayLocalDate, viewDay } from "./day";
+import { loadEodReportView } from "./eod-report";
 
 export interface TodaySnapshot {
   kind: "ready";
@@ -37,6 +39,9 @@ export interface TodaySnapshot {
    *  review UI after a refresh with no AI call. `isStale` compares its base revision against
    *  this same read's `tasks`/plan state; it is a live comparison, never itself persisted. */
   pendingAiProposal: { proposal: AiProposal; isStale: boolean } | null;
+  /** Today's end-of-day review, if one was written (Phase 7), and whether the day has changed
+   *  since — read only, no model call. Always null for a future day: only today can be reviewed. */
+  eodReport: EodReportView | null;
   /** The instant this snapshot was computed — the shared clock's starting point. */
   now: Date;
 }
@@ -94,6 +99,10 @@ export async function getTodaySnapshot(
     day ? getLatestRevisionNumber(supabase, day.id) : Promise.resolve(null),
   ]);
 
+  // Only today is reviewable; the tasks are the ones just read, so staleness costs no extra read.
+  const eodReport =
+    viewState === "today" && day ? await loadEodReportView(supabase, day.id, tasks) : null;
+
   return {
     kind: "ready",
     viewState,
@@ -109,6 +118,7 @@ export async function getTodaySnapshot(
     tasks,
     spillover,
     briefingText: briefing?.rawText ?? null,
+    eodReport,
     now,
   };
 }

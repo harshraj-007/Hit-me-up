@@ -12,6 +12,7 @@ vi.mock("@/server/db/repositories/briefings", () => ({ getLatestBriefing: vi.fn(
 vi.mock("@/server/db/repositories/ai-proposals", () => ({ findPendingProposal: vi.fn() }));
 vi.mock("@/server/db/repositories/plans", () => ({ getLatestRevisionNumber: vi.fn() }));
 vi.mock("./day", () => ({ findCurrentDay: vi.fn(), todayLocalDate: vi.fn(), viewDay: vi.fn() }));
+vi.mock("./eod-report", () => ({ loadEodReportView: vi.fn() }));
 
 import { requireUser } from "@/server/auth/session";
 import { listSpilloverTasks, listTasksForDay } from "@/server/db/repositories/tasks";
@@ -19,6 +20,7 @@ import { getLatestBriefing } from "@/server/db/repositories/briefings";
 import { findPendingProposal } from "@/server/db/repositories/ai-proposals";
 import { getLatestRevisionNumber } from "@/server/db/repositories/plans";
 import { findCurrentDay, todayLocalDate, viewDay } from "./day";
+import { loadEodReportView } from "./eod-report";
 import { getTodaySnapshot } from "./today";
 
 const TODAY = { id: "day-1", userId: "user-1", localDate: "2026-09-24", timezone: "Asia/Calcutta" };
@@ -43,6 +45,7 @@ beforeEach(() => {
   vi.mocked(getLatestBriefing).mockResolvedValue(null);
   vi.mocked(findPendingProposal).mockResolvedValue(null);
   vi.mocked(getLatestRevisionNumber).mockResolvedValue(1);
+  vi.mocked(loadEodReportView).mockResolvedValue(null);
 });
 
 describe("getTodaySnapshot", () => {
@@ -85,6 +88,31 @@ describe("getTodaySnapshot", () => {
   it("does not look for spillover when there is no previous day row", async () => {
     await getTodaySnapshot();
     expect(listSpilloverTasks).not.toHaveBeenCalled();
+  });
+
+  describe("the end-of-day review (Phase 7)", () => {
+    const VIEW = { report: { id: "r1" }, isStale: true } as never;
+
+    it("is loaded for today from today's own day id and the tasks just read", async () => {
+      vi.mocked(loadEodReportView).mockResolvedValue(VIEW);
+      const snapshot = await getTodaySnapshot();
+      expect(snapshot).toMatchObject({ viewState: "today", eodReport: VIEW });
+      expect(loadEodReportView).toHaveBeenCalledWith(expect.anything(), "day-1", []);
+    });
+
+    it("is null when no report exists yet", async () => {
+      await expect(getTodaySnapshot()).resolves.toMatchObject({ eodReport: null });
+    });
+
+    it("is never loaded for a future day, even one that has a row — only today can be reviewed", async () => {
+      vi.mocked(viewDay).mockImplementation(async (_c, _u, date) =>
+        date === "2026-09-26"
+          ? { id: "day-5", userId: "user-1", localDate: "2026-09-26", timezone: "Asia/Calcutta" }
+          : null,
+      );
+      await expect(getTodaySnapshot("2026-09-26")).resolves.toMatchObject({ eodReport: null });
+      expect(loadEodReportView).not.toHaveBeenCalled();
+    });
   });
 
   describe("a future date", () => {

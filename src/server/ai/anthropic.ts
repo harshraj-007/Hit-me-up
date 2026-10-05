@@ -28,6 +28,14 @@ export interface MessagesClient {
   };
 }
 
+/** What the sibling end-of-day adapter (`anthropic-eod.ts`) needs from the SDK, re-exported here so
+ *  that THIS file stays the only one in the codebase that imports it (`boundaries.test.ts`). */
+export type AnthropicMessage = Anthropic.Message;
+export type AnthropicToolInputSchema = Anthropic.Tool.InputSchema;
+export function createDefaultClient(apiKey: string): MessagesClient {
+  return new Anthropic({ apiKey });
+}
+
 export interface AnthropicGeneratorDeps {
   /** Overrides configuration lookup (tests). */
   config?: () => AiConfig | null;
@@ -37,7 +45,7 @@ export interface AnthropicGeneratorDeps {
 }
 
 /** Maps an SDK failure to a fixed category WITHOUT forwarding any of its content. */
-function classify(error: unknown, timedOut: boolean, cancelled: boolean): AiFailureReason {
+export function classify(error: unknown, timedOut: boolean, cancelled: boolean): AiFailureReason {
   if (timedOut) return "timeout";
   if (cancelled) return "cancelled";
   const e = error as { name?: unknown; status?: unknown } | null;
@@ -50,7 +58,7 @@ function classify(error: unknown, timedOut: boolean, cancelled: boolean): AiFail
   return "provider_error";
 }
 
-function sanitizedDiagnostic(error: unknown): string {
+export function sanitizedDiagnostic(error: unknown): string {
   const status = (error as { status?: unknown } | null)?.status;
   const name = (error as { name?: unknown } | null)?.name;
   return `anthropic ${typeof name === "string" ? name : "error"}${

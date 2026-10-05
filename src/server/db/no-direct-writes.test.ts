@@ -18,6 +18,7 @@ const LOCKED = [
   "ai_proposals",
   "push_subscriptions",
   "scheduled_notifications",
+  "eod_reports",
 ];
 const WRITE = /\.(insert|upsert|update|delete)\s*\(/;
 const SRC = join(process.cwd(), "src");
@@ -94,6 +95,7 @@ describe("no direct writes to the locked tables from application code", () => {
         "src/server/db/repositories/days.ts:days",
         "src/server/db/repositories/plans.ts:plan_revisions", // read-only: getLatestRevisionNumber
         "src/server/db/repositories/plans.ts:plans",
+        "src/server/db/repositories/plan-revisions.ts:plan_revisions", // read-only: listRevisionNumbers (Phase 7)
         "src/server/db/repositories/ai-proposals.ts:ai_proposals", // findPendingProposal
         "src/server/db/repositories/ai-proposals.ts:ai_proposals", // getAiProposalById
       ].sort(),

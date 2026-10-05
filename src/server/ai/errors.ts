@@ -30,8 +30,20 @@ export class AiError extends AppError {
   readonly status: number;
   readonly reason: AiFailureReason;
 
-  constructor(reason: AiFailureReason, diagnostic?: string) {
-    super(SAFE[reason].message, diagnostic ? { cause: new Error(diagnostic) } : undefined);
+  /** `feature` only changes the wording of the one message that names it ("unavailable"); every
+   *  other message is feature-neutral already. Defaults to planning, so existing callers and their
+   *  tests are untouched. */
+  constructor(
+    reason: AiFailureReason,
+    diagnostic?: string,
+    feature: "planning" | "review" = "planning",
+  ) {
+    super(
+      reason === "unavailable" && feature === "review"
+        ? "The end-of-day review isn't available right now."
+        : SAFE[reason].message,
+      diagnostic ? { cause: new Error(diagnostic) } : undefined,
+    );
     this.status = SAFE[reason].status;
     this.reason = reason;
   }
