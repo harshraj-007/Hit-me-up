@@ -26,11 +26,18 @@ supabase db push                                  # applies supabase/migrations/
 That creates every table, RLS policy and the five RPC functions the app relies on
 (`create_task_with_history`, `change_task_status`, `reschedule_task` and `apply_replan` — the only write path to tasks and their history — and `ensure_day`, the only path that creates a planning day with its plan and first revision) — see
 [PROJECT_ARCHITECTURE.md §16](PROJECT_ARCHITECTURE.md) for the schema, the RLS strategy, and
-why atomic RPCs exist instead of plain inserts/updates. `supabase/tests/rls_isolation.sql`
-is a from-scratch check that one user can't read or write another's rows. **It has not been
-executed against the live project** (see Known limitations). To run it, start a local stack
-(`supabase start`, needs Docker) and follow the `psql` command in the comment at the top of the
-file — it is a plain SQL script, not a pgTAP test, so `supabase test db` will not run it.
+why atomic RPCs exist instead of plain inserts/updates. The database behaviour is checked by the
+SQL suites in `supabase/tests/` (cross-user isolation, grants, atomic confirmation, the AI usage
+limit, …) and the two-connection `concurrent_*.sh` scripts. `supabase/tests/run-all.sh` applies every
+migration to a **disposable local Postgres** (it refuses anything non-local) behind a minimal
+Supabase-shaped bootstrap and runs them all — that is also what the CI `database` job does:
+
+```bash
+PG_ADMIN_URL=postgres://postgres:postgres@127.0.0.1:5432/postgres bash supabase/tests/run-all.sh
+```
+
+This verifies the SQL on plain Postgres. It has **not** been executed against a real Supabase
+project (see Known limitations).
 
 ## Known limitations
 

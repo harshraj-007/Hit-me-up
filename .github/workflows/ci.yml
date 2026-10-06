@@ -5,9 +5,14 @@ on:
     branches: [main]
   pull_request:
 
+# Nothing in this workflow needs a secret. Every value below is a test-only placeholder: CI never
+# talks to a real Supabase project, Anthropic, Vercel or a push service, and the database job runs
+# against a throwaway Postgres service container.
+
 jobs:
   verify:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -15,8 +20,44 @@ jobs:
           node-version-file: .nvmrc
           cache: npm
       - run: npm ci
+      - run: npm run format:check
       - run: npm run lint
       - run: npm run typecheck
       - run: npm test
+      # The production build, explicitly, so a build failure is reported as its own step. (Playwright
+      # builds again below with its own dummy environment.) The values are inert placeholders.
+      - run: npm run build
+        env:
+          NEXT_PUBLIC_SUPABASE_URL: http://127.0.0.1:54399
+          NEXT_PUBLIC_SUPABASE_ANON_KEY: ci-anon-key-not-a-secret
+          NEXT_PUBLIC_APP_URL: http://127.0.0.1:3100
       - run: npx playwright install --with-deps chromium
       - run: npm run test:e2e
+
+  # Database behaviour is security-critical (row-level security, SECURITY DEFINER functions, grants,
+  # atomic confirmation, the AI usage limit), so it is verified here, not only by TypeScript tests:
+  # a fresh Postgres 17, a minimal Supabase-shaped bootstrap, every migration in lexical order,
+  # every SQL suite and every concurrency script. See supabase/tests/run-all.sh.
+  database:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_PASSWORD: postgres # throwaway container, reachable only from this job
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install the psql client
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq postgresql-client
+      - name: Migrations, SQL suites and concurrency scripts from an empty database
+        run: bash supabase/tests/run-all.sh
+        env:
+          PG_ADMIN_URL: postgres://postgres:postgres@127.0.0.1:5432/postgres
