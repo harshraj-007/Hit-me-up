@@ -222,6 +222,8 @@ export interface Database {
           created_at: string;
           confirmed_at: string | null;
           applied_revision_number: number | null;
+          /** The saved briefing a proposal was planned from (Phase 8); null for "Ask AI". */
+          briefing_id: string | null;
         };
         // Not used directly — every write goes through create_ai_proposal() /
         // confirm_ai_proposal_by_id() / discard_ai_proposal() (all below), never .insert()/
@@ -239,6 +241,7 @@ export interface Database {
           conflicts_after?: unknown;
           validation_status: AiProposalValidationStatusColumn;
           status?: AiProposalStatusColumn;
+          briefing_id?: string | null;
         };
         Update: {
           status?: AiProposalStatusColumn;
@@ -415,6 +418,9 @@ export interface Database {
           /** JSON array of ConflictAfter (display-only). */
           p_conflicts_after: unknown;
           p_validation_status: AiProposalValidationStatusColumn;
+          /** Phase 8: the caller's own briefing for THIS day, when planned from one. Required for
+           *  a proposal that contains `create` changes. */
+          p_briefing_id?: string | null;
         };
         Returns: Database["public"]["Tables"]["ai_proposals"]["Row"];
       };

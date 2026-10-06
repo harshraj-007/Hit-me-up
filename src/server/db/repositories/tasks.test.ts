@@ -207,6 +207,30 @@ describe("toConfirmChangeRow", () => {
     expect(row).toEqual({ ref: "t2", task_id: "task-2", type: "unschedule" });
     expect(row).not.toHaveProperty("new_start");
   });
+
+  it("a create carries exactly the seven wire fields — no end, id, source, notes or status", () => {
+    const row = toConfirmChangeRow({
+      kind: "create",
+      ref: "n1",
+      title: "Deep work",
+      start: new Date("2026-10-01T10:00:00.000Z"),
+      durationMinutes: 60,
+      priority: "high",
+      taskKind: "deadline",
+    });
+    expect(row).toEqual({
+      ref: "n1",
+      type: "create",
+      title: "Deep work",
+      start: "2026-10-01T10:00:00.000Z",
+      duration_minutes: 60,
+      priority: "high",
+      kind: "deadline",
+    });
+    expect(Object.keys(row).sort()).toEqual(
+      ["duration_minutes", "kind", "priority", "ref", "start", "title", "type"].sort(),
+    );
+  });
 });
 
 describe("confirmAiProposal", () => {

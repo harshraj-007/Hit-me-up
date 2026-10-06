@@ -40,6 +40,8 @@ export interface AiProposal {
   createdAt: Date;
   confirmedAt: Date | null;
   appliedRevisionNumber: number | null;
+  /** The saved briefing this proposal was planned from (Phase 8); null for "Ask AI". */
+  briefingId: string | null;
 }
 
 /** `P0002` from any RPC in this file: not found, not the caller's, or not in the required
@@ -74,6 +76,7 @@ function mapProposal(row: ProposalRow): AiProposal {
     createdAt: new Date(row.created_at),
     confirmedAt: row.confirmed_at ? new Date(row.confirmed_at) : null,
     appliedRevisionNumber: row.applied_revision_number,
+    briefingId: row.briefing_id,
   };
 }
 
@@ -87,6 +90,9 @@ export interface CreateAiProposalInput {
    *  stored `changes` (confirm wire shape, via the existing `toConfirmationChanges`); the rest
    *  is stored as-is, for display only. */
   validation: ValidationResult;
+  /** Set only when the proposal was planned from the caller's own saved briefing (Phase 8). The
+   *  database refuses a `create` change without it, and re-checks the briefing's ownership. */
+  briefingId?: string | null;
 }
 
 /**
@@ -112,6 +118,7 @@ export async function createAiProposal(
     p_rejected: rejected,
     p_conflicts_after: conflictsAfter,
     p_validation_status: input.validation.status,
+    p_briefing_id: input.briefingId ?? null,
   });
   if (error) {
     if (error.code === NO_PROFILE_OR_DAY) {

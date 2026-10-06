@@ -45,3 +45,26 @@ export async function insertBriefing(
   if (error) throw new ExternalServiceError("supabase", { cause: error });
   return mapBriefing(data);
 }
+
+/**
+ * The saved briefing Phase 8 plans from: the latest one for THIS day, read for THIS user. RLS
+ * already scopes the read to the caller; the explicit `user_id` filter is a second, independent
+ * check, and the day is the server-resolved one — the browser names neither.
+ */
+export async function getLatestBriefingForDay(
+  supabase: SupabaseServerClient,
+  userId: string,
+  dayId: string,
+): Promise<Briefing | null> {
+  const { data, error } = await supabase
+    .from("briefings")
+    .select("id, raw_text, created_at")
+    .eq("user_id", userId)
+    .eq("day_id", dayId)
+    .order("created_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
+  if (error) throw new ExternalServiceError("supabase", { cause: error });
+  return data ? mapBriefing(data) : null;
+}

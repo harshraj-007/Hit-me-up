@@ -1,4 +1,5 @@
-import type { PlanningContext, UserIntent } from "@/domain/ai-planning";
+import type { BriefingPlanningContext, PlanningContext, UserIntent } from "@/domain/ai-planning";
+import type { BriefingPlanGenerator } from "./briefing-port";
 import type { EodFacts } from "@/domain/eod";
 import type { EodInterpreter, InterpretOptions } from "./eod-port";
 import type { ProposalGenerator, ProposeOptions } from "./port";
@@ -50,6 +51,28 @@ export function createFakeEodInterpreter(
       calls.push({ facts, options });
       return typeof response === "function"
         ? (response as (facts: EodFacts) => unknown)(facts)
+        : response;
+    },
+  };
+}
+
+export interface FakeBriefingCall {
+  context: BriefingPlanningContext;
+  note: string | null;
+  options?: ProposeOptions;
+}
+
+/** A deterministic, in-memory `BriefingPlanGenerator` for tests of anything above the provider. */
+export function createFakeBriefingGenerator(
+  response: unknown | ((context: BriefingPlanningContext, note: string | null) => unknown),
+): BriefingPlanGenerator & { calls: FakeBriefingCall[] } {
+  const calls: FakeBriefingCall[] = [];
+  return {
+    calls,
+    async propose(context, note, options) {
+      calls.push({ context, note, options });
+      return typeof response === "function"
+        ? (response as (c: BriefingPlanningContext, n: string | null) => unknown)(context, note)
         : response;
     },
   };

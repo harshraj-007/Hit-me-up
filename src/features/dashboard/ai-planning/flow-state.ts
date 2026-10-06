@@ -61,6 +61,7 @@ export function initialVoicePlanStateFor(resumed: ProposalView | null): VoicePla
 
 export type VoicePlanEvent =
   | { type: "start_typing" }
+  | { type: "start_briefing"; epoch: number }
   | { type: "start_recording"; epoch: number }
   | { type: "transcript_progress"; epoch: number; transcript: string }
   | { type: "stop_recording"; epoch: number }
@@ -84,6 +85,11 @@ export function reduceVoicePlan(state: VoicePlanState, event: VoicePlanEvent): V
   switch (event.type) {
     case "start_typing":
       return { status: "transcript_review", epoch: state.epoch, source: "typed", text: "" };
+
+    case "start_briefing":
+      // "Plan my day": no transcript to review — the saved briefing IS the input, loaded by the
+      // server — so this goes straight to generating, under a fresh epoch like any new branch.
+      return { status: "generating", epoch: event.epoch, source: "typed", text: "" };
 
     case "start_recording":
       // Always accepted, even mid-flow: starting a new recording supersedes whatever came before.

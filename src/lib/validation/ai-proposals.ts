@@ -1,5 +1,12 @@
 import { z } from "zod";
-import { ALIAS_PATTERN } from "@/domain/ai-planning";
+import {
+  ALIAS_PATTERN,
+  MAX_NEW_TASK_MINUTES,
+  MAX_NEW_TASK_TITLE_LENGTH,
+  MIN_NEW_TASK_MINUTES,
+  NEW_TASK_KINDS,
+  NEW_TASK_PRIORITIES,
+} from "@/domain/ai-planning";
 
 /**
  * Read-boundary validation for the JSONB columns on `ai_proposals` (Phase 5.5). Nothing in the
@@ -22,6 +29,16 @@ export const storedChangeRowSchema = z.discriminatedUnion("type", [
     new_start: z.string(),
   }),
   z.strictObject({ ref: refField, task_id: z.uuid(), type: z.literal("unschedule") }),
+  // A NEW task (Phase 8): server-assigned `n1`… ref, no task id.
+  z.strictObject({
+    ref: z.string().regex(/^n[1-9]\d{0,3}$/),
+    type: z.literal("create"),
+    title: z.string().min(1).max(MAX_NEW_TASK_TITLE_LENGTH),
+    start: z.string(),
+    duration_minutes: z.number().int().min(MIN_NEW_TASK_MINUTES).max(MAX_NEW_TASK_MINUTES),
+    priority: z.enum(NEW_TASK_PRIORITIES),
+    kind: z.enum(NEW_TASK_KINDS),
+  }),
 ]);
 
 export const storedChangesSchema = z.array(storedChangeRowSchema).max(20);
@@ -44,6 +61,14 @@ export const storedRejectionSchema = z.strictObject({
     "conflicting_changes",
     "too_many_changes",
     "unsupported_change",
+    "invalid_title",
+    "invalid_duration",
+    "invalid_priority",
+    "invalid_task_kind",
+    "fixed_missing_time",
+    "duplicate_title",
+    "overlaps_existing",
+    "overlaps_proposed",
   ]),
   message: z.string(),
   changeIndex: z.number().int().nullable(),

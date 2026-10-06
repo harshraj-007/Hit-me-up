@@ -1,8 +1,13 @@
 import { z } from "zod";
 import { isPlanDateAllowed } from "@/domain/days";
 import {
+  MAX_NEW_TASK_MINUTES,
+  MAX_NEW_TASK_TITLE_LENGTH,
   MAX_PROPOSED_CHANGES,
   MAX_REASON_LENGTH,
+  MIN_NEW_TASK_MINUTES,
+  NEW_TASK_KINDS,
+  NEW_TASK_PRIORITIES,
   MAX_UNDERSTOOD_LENGTH,
   MAX_UNRESOLVED_ITEMS,
   MAX_UNRESOLVED_LENGTH,
@@ -51,6 +56,22 @@ export function parseUserIntent(
   return { ok: true, intent: { ...result.data, submittedAt: server.submittedAt } };
 }
 
+/* ── Plan-from-briefing input ─────────────────────────────────────────────────
+ * What the BROWSER may send to "Plan my day": the day it is looking at, an optional extra note
+ * (typed, or a voice transcript the user reviewed — Phase 5.4) and a client idempotency key.
+ * NOT accepted, so they cannot even be expressed: the briefing text, a briefing id, a day id,
+ * the timezone, the clock, a user id. The server loads the saved briefing itself. */
+export const briefingPlanInputSchema = z.strictObject({
+  id: z.uuid(),
+  planningDate: localDateSchema,
+  /** `typed` when there is no note. */
+  source: z.enum(["typed", "voice"]),
+  /** Optional steer ("keep the evening free"). May be empty; never the briefing itself. */
+  note: z.string().trim().max(MAX_USER_INTENT_LENGTH),
+});
+
+export type BriefingPlanInput = z.infer<typeof briefingPlanInputSchema>;
+
 /* ── Model output ─────────────────────────────────────────────────────────────
  * Zod establishes that the SHAPE is acceptable. It does not make anything trusted: refs,
  * times and eligibility are decided later by `validateProposal`. Every change object is
@@ -73,6 +94,26 @@ export const unscheduleChangeSchema = z.strictObject({
 });
 
 export const proposedChangeSchema = z.discriminatedUnion("kind", [
+  moveChangeSchema,
+  unscheduleChangeSchema,
+]);
+
+/** A NEW task (Phase 8 — plan from the briefing only). No id, no end, no notes, no source: the
+ *  end is derived from `start + durationMinutes`, and a field not listed here is refused. */
+export const createChangeSchema = z.strictObject({
+  kind: z.literal("create"),
+  title: z.string().trim().min(1).max(MAX_NEW_TASK_TITLE_LENGTH),
+  // Shape is checked by the domain (a real local date/time in the day's timezone).
+  start: z.string().min(1).max(40),
+  durationMinutes: z.number().int().min(MIN_NEW_TASK_MINUTES).max(MAX_NEW_TASK_MINUTES),
+  priority: z.enum(NEW_TASK_PRIORITIES),
+  taskKind: z.enum(NEW_TASK_KINDS),
+  timeStated: z.boolean(),
+  reason: reasonField,
+});
+
+export const briefingProposedChangeSchema = z.discriminatedUnion("kind", [
+  createChangeSchema,
   moveChangeSchema,
   unscheduleChangeSchema,
 ]);
@@ -100,12 +141,33 @@ export const proposalOutputSchema = z.strictObject({
     .max(MAX_UNRESOLVED_ITEMS),
 });
 
+/** The strict shape handed to the provider for a plan-from-briefing request (see above). */
+export const briefingProposalOutputSchema = z.strictObject({
+  understood: z.string().trim().min(1).max(MAX_UNDERSTOOD_LENGTH),
+  changes: z.array(briefingProposedChangeSchema).max(MAX_PROPOSED_CHANGES),
+  unresolved: z
+    .array(z.string().trim().min(1).max(MAX_UNRESOLVED_LENGTH))
+    .max(MAX_UNRESOLVED_ITEMS),
+});
+
 export type ParseProposalResult =
   | ({ ok: true } & ParsedProposal)
   | { ok: false; reason: "malformed" | "too_many_changes"; message: string };
 
 const DURATION_LIKE_KEY = /end|duration|until|length|minutes|hours/i;
 const KNOWN_KINDS = new Set(["move", "unschedule"]);
+const KNOWN_KINDS_WITH_CREATE = new Set(["move", "unschedule", "create"]);
+const CREATE_KEYS = [
+  "kind",
+  "title",
+  "start",
+  "durationMinutes",
+  "priority",
+  "taskKind",
+  "timeStated",
+  "reason",
+];
+const END_LIKE_KEY = /end|until|stop|finish/i;
 const SAFE_LABEL = /^[a-z_]{1,32}$/;
 const SAFE_REF = /^t[1-9]\d{0,3}$/;
 
@@ -117,10 +179,65 @@ function refOf(raw: unknown): string | null {
   return isRecord(raw) && typeof raw.ref === "string" && SAFE_REF.test(raw.ref) ? raw.ref : null;
 }
 
+/**
+ * Why a `create` that failed the strict shape was refused — fixed text only, and as specific as
+ * the raw item allows, so the review can say "that title was too long" rather than "malformed".
+ */
+function rejectRawCreate(raw: Record<string, unknown>, index: number): Rejection {
+  const reject = (code: Rejection["code"], message: string): Rejection => ({
+    code,
+    message,
+    changeIndex: index,
+    ref: null,
+  });
+  const extra = Object.keys(raw).filter((k) => !CREATE_KEYS.includes(k));
+  if (extra.some((k) => END_LIKE_KEY.test(k))) {
+    return reject(
+      "invalid_duration",
+      "A new task takes a start and a duration in minutes, never an end time.",
+    );
+  }
+  if (extra.length > 0)
+    return reject("unsupported_change", "That change contained fields that aren't allowed.");
+  if (
+    typeof raw.title !== "string" ||
+    raw.title.trim().length === 0 ||
+    raw.title.trim().length > MAX_NEW_TASK_TITLE_LENGTH
+  ) {
+    return reject("invalid_title", "A new task needs a short plain-text title.");
+  }
+  if (!(NEW_TASK_KINDS as readonly unknown[]).includes(raw.taskKind)) {
+    return reject("invalid_task_kind", "That isn't a kind of task a plan can create.");
+  }
+  if (!(NEW_TASK_PRIORITIES as readonly unknown[]).includes(raw.priority)) {
+    return reject("invalid_priority", "That isn't a valid priority.");
+  }
+  if (
+    typeof raw.durationMinutes !== "number" ||
+    !Number.isInteger(raw.durationMinutes) ||
+    raw.durationMinutes < MIN_NEW_TASK_MINUTES ||
+    raw.durationMinutes > MAX_NEW_TASK_MINUTES
+  ) {
+    return reject(
+      "invalid_duration",
+      `A new task must last between ${MIN_NEW_TASK_MINUTES} minutes and 24 hours.`,
+    );
+  }
+  if (raw.taskKind === "fixed" && raw.timeStated !== true) {
+    return reject(
+      "fixed_missing_time",
+      "A fixed task needs a time you gave yourself, and your briefing doesn't name one.",
+    );
+  }
+  return reject("unsupported_change", "That change was incomplete or malformed.");
+}
+
 /** Explains, with fixed text only, why one change was not accepted at the transport boundary. */
-function rejectRawChange(raw: unknown, index: number): Rejection {
+function rejectRawChange(raw: unknown, index: number, allowCreate: boolean): Rejection {
   const ref = refOf(raw);
-  if (isRecord(raw) && typeof raw.kind === "string" && KNOWN_KINDS.has(raw.kind)) {
+  if (allowCreate && isRecord(raw) && raw.kind === "create") return rejectRawCreate(raw, index);
+  const known = allowCreate ? KNOWN_KINDS_WITH_CREATE : KNOWN_KINDS;
+  if (isRecord(raw) && typeof raw.kind === "string" && known.has(raw.kind)) {
     const allowed =
       raw.kind === "move" ? ["kind", "ref", "newStart", "reason"] : ["kind", "ref", "reason"];
     const extra = Object.keys(raw).filter((k) => !allowed.includes(k));
@@ -160,9 +277,15 @@ function rejectRawChange(raw: unknown, index: number): Rejection {
  * changes) fail the parse; a single unsupported or malformed change becomes a rejection so the
  * valid ones can still be judged. `create`, `delete`, `change_duration`, extra fields and
  * anything else that isn't exactly `move` or `unschedule` lands in `rejected` — never in
- * `proposal.changes`.
+ * `proposal.changes`. Only a plan-from-briefing parse (`allowCreate`) also accepts a `create`;
+ * the ordinary flow's parse keeps refusing it, exactly as before.
  */
-export function parseRawProposal(raw: unknown): ParseProposalResult {
+export function parseRawProposal(
+  raw: unknown,
+  options: { allowCreate?: boolean } = {},
+): ParseProposalResult {
+  const allowCreate = options.allowCreate === true;
+  const changeSchema = allowCreate ? briefingProposedChangeSchema : proposedChangeSchema;
   const envelope = rawProposalEnvelopeSchema.safeParse(raw);
   if (!envelope.success) {
     const tooMany = envelope.error.issues.some(
@@ -181,12 +304,12 @@ export function parseRawProposal(raw: unknown): ParseProposalResult {
   const sourceIndexes: number[] = [];
   const rejected: Rejection[] = [];
   envelope.data.changes.forEach((item, index) => {
-    const parsed = proposedChangeSchema.safeParse(item);
+    const parsed = changeSchema.safeParse(item);
     if (parsed.success) {
       changes.push(parsed.data);
       sourceIndexes.push(index);
     } else {
-      rejected.push(rejectRawChange(item, index));
+      rejected.push(rejectRawChange(item, index, allowCreate));
     }
   });
 

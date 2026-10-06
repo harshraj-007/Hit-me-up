@@ -126,6 +126,7 @@ beforeEach(() => {
     createdAt: NOW,
     confirmedAt: null,
     appliedRevisionNumber: null,
+    briefingId: null,
   }));
 });
 
@@ -590,6 +591,7 @@ describe("persistence (Phase 5.5)", () => {
         createdAt: NOW,
         confirmedAt: null,
         appliedRevisionNumber: null,
+        briefingId: null,
       };
     });
     const { result } = await run(request(), (c: PlanningContext) => {
@@ -668,6 +670,7 @@ describe("loadPendingAiProposal (Phase 5.5 resume)", () => {
       createdAt: NOW,
       confirmedAt: null,
       appliedRevisionNumber: null,
+      briefingId: null,
     };
     vi.mocked(findPendingProposal).mockResolvedValue(stored);
     vi.mocked(getLatestRevisionNumber).mockResolvedValue(3);

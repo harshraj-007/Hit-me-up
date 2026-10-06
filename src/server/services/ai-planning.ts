@@ -1,5 +1,5 @@
 import "server-only";
-import { addDays, dayBoundsUtc } from "@/domain/days";
+import { addDays, dayBoundsUtc, type DayBounds } from "@/domain/days";
 import {
   buildPlanningContext,
   validateProposal,
@@ -18,7 +18,7 @@ import {
 } from "@/server/db/repositories/ai-proposals";
 import { getLatestRevisionNumber } from "@/server/db/repositories/plans";
 import { listSpilloverTasks, listTasksForDay } from "@/server/db/repositories/tasks";
-import { createSupabaseServerClient } from "@/server/db/supabase-server";
+import { createSupabaseServerClient, type SupabaseServerClient } from "@/server/db/supabase-server";
 import { NotFoundError, ValidationError } from "@/server/errors";
 import { todayLocalDate, viewDay } from "./day";
 
@@ -86,25 +86,7 @@ export async function generateAiProposal(
     ]);
   }
 
-  // The revision is read BEFORE the tasks. If the plan changes between the two reads, the tasks
-  // are newer than `baseRevision`, so a later confirm (which compares it) fails as stale. Read
-  // the other way round, it could accept a proposal computed from outdated tasks.
-  const baseRevision = await getLatestRevisionNumber(supabase, day.id);
-  if (baseRevision === null) throw new NotFoundError({ message: "That day's plan wasn't found." });
-
-  const previous = await viewDay(supabase, user.id, addDays(day.localDate, -1));
-  const bounds = dayBoundsUtc(day.localDate, day.timezone);
-  const [own, spill] = await Promise.all([
-    listTasksForDay(supabase, day.id),
-    previous ? listSpilloverTasks(supabase, previous.id, bounds.start) : Promise.resolve([]),
-  ]);
-
-  // RLS already scopes these reads to the caller. This is a second, independent check: a row
-  // that is not the caller's, or not from the expected day, never reaches the context.
-  const tasks: Task[] = [
-    ...own.filter((t) => t.userId === user.id && t.dayId === day.id),
-    ...spill.filter((t) => t.userId === user.id && previous !== null && t.dayId === previous.id),
-  ];
+  const { baseRevision, bounds, tasks } = await loadPlanningInputs(supabase, user.id, day);
 
   const { context, state } = buildPlanningContext({
     dayId: day.id,
@@ -137,6 +119,39 @@ export async function generateAiProposal(
     unresolved: proposal.proposal.unresolved,
     validation,
   };
+}
+
+/**
+ * What both planning flows (ask-AI and plan-from-briefing) read before building a context: the
+ * plan's base revision, the day's bounds in its frozen timezone, and the caller's own tasks plus
+ * the previous day's cross-midnight spillover — all under the caller's RLS.
+ */
+export async function loadPlanningInputs(
+  supabase: SupabaseServerClient,
+  userId: string,
+  day: { id: string; localDate: string; timezone: string },
+): Promise<{ baseRevision: number; bounds: DayBounds; tasks: Task[] }> {
+  // The revision is read BEFORE the tasks. If the plan changes between the two reads, the tasks
+  // are newer than `baseRevision`, so a later confirm (which compares it) fails as stale. Read
+  // the other way round, it could accept a proposal computed from outdated tasks.
+  const baseRevision = await getLatestRevisionNumber(supabase, day.id);
+  if (baseRevision === null) throw new NotFoundError({ message: "That day's plan wasn't found." });
+
+  const previous = await viewDay(supabase, userId, addDays(day.localDate, -1));
+  const bounds = dayBoundsUtc(day.localDate, day.timezone);
+  const [own, spill] = await Promise.all([
+    listTasksForDay(supabase, day.id),
+    previous ? listSpilloverTasks(supabase, previous.id, bounds.start) : Promise.resolve([]),
+  ]);
+
+  // RLS already scopes these reads to the caller. This is a second, independent check: a row
+  // that is not the caller's, or not from the expected day, never reaches the context.
+  const tasks: Task[] = [
+    ...own.filter((t) => t.userId === userId && t.dayId === day.id),
+    ...spill.filter((t) => t.userId === userId && previous !== null && t.dayId === previous.id),
+  ];
+
+  return { baseRevision, bounds, tasks };
 }
 
 export interface PendingAiProposal {

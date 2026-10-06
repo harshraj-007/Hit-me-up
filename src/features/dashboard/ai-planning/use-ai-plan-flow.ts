@@ -12,11 +12,17 @@ import {
   confirmAiProposalAction,
   discardAiProposalAction,
   generateAiProposalAction,
+  generateBriefingPlanAction,
 } from "./actions";
 import { initialVoicePlanStateFor, reduceVoicePlan, type VoicePlanState } from "./flow-state";
 
+export type AiPlanMode = "ask" | "briefing";
+
 export interface UseAiPlanFlowOptions {
   planningDate: string;
+  /** `briefing` ("Plan my day") generates NEW tasks from the saved briefing, which the SERVER
+   *  loads; `ask` is the ordinary schedule-change request. Confirmation is identical for both. */
+  mode?: AiPlanMode;
   /** A proposal the server already found pending for this day (Phase 5.5 resume) — the panel
    *  opens straight into its review, with no AI call. Only read once, on mount: this hook does
    *  not react to it changing later. */
@@ -33,7 +39,11 @@ export interface UseAiPlanFlowOptions {
  * invokes, and nothing auto-applies a resumed proposal — it starts in `proposal_ready`, the
  * exact same review-and-wait state a fresh generation reaches, never past it.
  */
-export function useAiPlanFlow({ planningDate, resumedProposal }: UseAiPlanFlowOptions) {
+export function useAiPlanFlow({
+  planningDate,
+  mode = "ask",
+  resumedProposal,
+}: UseAiPlanFlowOptions) {
   const [state, dispatch] = useReducer(
     reduceVoicePlan,
     resumedProposal ?? null,
@@ -110,18 +120,50 @@ export function useAiPlanFlow({ planningDate, resumedProposal }: UseAiPlanFlowOp
     const epoch = state.epoch;
     const { source, text } = state;
     dispatch({ type: "submit", epoch });
-    const result = await generateAiProposalAction({
+    // In briefing mode the text is only an optional NOTE; the briefing itself is never sent.
+    const result =
+      mode === "briefing"
+        ? await generateBriefingPlanAction({
+            id: crypto.randomUUID(),
+            source,
+            note: text,
+            planningDate,
+          })
+        : await generateAiProposalAction({ id: crypto.randomUUID(), source, text, planningDate });
+    if (!result.ok) {
+      dispatch({ type: "proposal_failed", epoch, message: result.error.message });
+      return;
+    }
+    dispatch({
+      type: "proposal_ready",
+      epoch,
+      view: proposalViewFromGenerated(result.data, mode === "briefing"),
+    });
+  }, [state, planningDate, mode]);
+
+  /** One explicit click on "Plan my day" → exactly one generation. The `generating` state ignores
+   *  a second click (the button is gone), and nothing calls this except that click. */
+  const planFromBriefing = useCallback(async () => {
+    if (state.status !== "idle") return;
+    stopSession();
+    const epoch = ++epochRef.current;
+    dispatch({ type: "start_briefing", epoch });
+    const result = await generateBriefingPlanAction({
       id: crypto.randomUUID(),
-      source,
-      text,
+      source: "typed",
+      note: "",
       planningDate,
     });
     if (!result.ok) {
       dispatch({ type: "proposal_failed", epoch, message: result.error.message });
       return;
     }
-    dispatch({ type: "proposal_ready", epoch, view: proposalViewFromGenerated(result.data) });
-  }, [state, planningDate]);
+    dispatch({
+      type: "proposal_ready",
+      epoch,
+      view: proposalViewFromGenerated(result.data, true),
+    });
+  }, [state.status, planningDate, stopSession]);
 
   const confirm = useCallback(async () => {
     if (state.status !== "proposal_ready") return;
@@ -147,6 +189,7 @@ export function useAiPlanFlow({ planningDate, resumedProposal }: UseAiPlanFlowOp
     stopRecording,
     editText,
     submit,
+    planFromBriefing,
     confirm,
     cancel,
     reset,

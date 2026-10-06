@@ -80,6 +80,7 @@ export function DashboardView({
   const [briefingText, setBriefingText] = useState(initialBriefingText);
   const [addOpen, setAddOpen] = useState(false);
   const [aiOpen, setAiOpen] = useState(false);
+  const [aiMode, setAiMode] = useState<"ask" | "briefing">("ask");
   const [reschedulingId, setReschedulingId] = useState<string | null>(null);
   const [pendingTaskId, setPendingTaskId] = useState<string | null>(null);
   const [isReplanning, setIsReplanning] = useState(false);
@@ -130,6 +131,7 @@ export function DashboardView({
       ),
     [tasks, visibleSpillover, now],
   );
+  const taskTitles = useMemo(() => new Map(tasks.map((t) => [t.id, t.title])), [tasks]);
   const rescheduling =
     [...dashboardTasks, ...spilloverTasks].find((t) => t.id === reschedulingId) ?? null;
   const busy = pendingTaskId !== null || isReplanning;
@@ -306,7 +308,10 @@ export function DashboardView({
           <Button
             size="sm"
             variant="secondary"
-            onClick={() => setAiOpen(true)}
+            onClick={() => {
+              setAiMode("ask");
+              setAiOpen(true);
+            }}
             disabled={!dayExists}
           >
             <Sparkles aria-hidden className="size-4" />
@@ -358,6 +363,10 @@ export function DashboardView({
               initialText={briefingText}
               isSaving={isSavingBriefing}
               onSave={handleSaveBriefing}
+              onPlan={() => {
+                setAiMode("briefing");
+                setAiOpen(true);
+              }}
             />
           </div>
         </div>
@@ -391,6 +400,8 @@ export function DashboardView({
         open={aiOpen}
         onOpenChange={setAiOpen}
         planningDate={localDate}
+        mode={aiMode}
+        taskTitles={taskTitles}
         timezone={timezone}
         resumedProposal={initialPendingAiProposal}
         onApplied={handleAiApplied}

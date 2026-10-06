@@ -2,10 +2,17 @@ import { taskDurationMs, detectScheduleConflicts } from "@/domain/scheduling";
 import { deriveTaskTemporalState, type Task } from "@/domain/tasks";
 import type { DayBounds } from "@/domain/days";
 import { assignAliases } from "./aliases";
+import { computeFreeWindows } from "./free-windows";
 import { formatLocalWallTime } from "./local-time";
 import { isAiMovable } from "./movability";
+import { mentionsClockTime } from "./new-task";
 import {
+  MAX_NEW_TASK_MINUTES,
+  MAX_NEW_TASK_TITLE_LENGTH,
   MAX_PROPOSED_CHANGES,
+  MIN_NEW_TASK_MINUTES,
+  type BriefingPlanningContext,
+  type BriefingPlanningRules,
   type ContextTask,
   type PlanningContext,
   type PlanningRules,
@@ -88,4 +95,50 @@ export function buildPlanningContext(input: BuildPlanningContextInput): {
     refToTaskId,
   };
   return { context, state };
+}
+
+export const BRIEFING_PLANNING_RULES: BriefingPlanningRules = {
+  allowedChangeKinds: ["create", "move", "unschedule"],
+  maxChanges: MAX_PROPOSED_CHANGES,
+  startFormat: "YYYY-MM-DDTHH:mm",
+  newTask: {
+    titleMaxLength: MAX_NEW_TASK_TITLE_LENGTH,
+    durationMinutes: { min: MIN_NEW_TASK_MINUTES, max: MAX_NEW_TASK_MINUTES },
+    priorities: ["high", "medium", "low"],
+    kinds: ["flexible", "deadline", "optional", "fixed"],
+    mustFitInsideRemainingDay: true,
+    fixedRequiresTimeStatedInBriefing: true,
+    endIsDerived: true,
+  },
+  onlyMovableTasksMayChange: true,
+};
+
+export interface BuildBriefingPlanningContextInput extends BuildPlanningContextInput {
+  /** The caller's own saved briefing for this day, loaded by the server. Untrusted text. */
+  briefingText: string;
+}
+
+/**
+ * Plan-from-briefing (Phase 8): the ordinary planning context and state (same allow-list, same
+ * aliases, same "model never sees an id or a note"), plus the day's deterministic free windows,
+ * the creation rules, and the saved briefing. The returned `state` carries the creation policy,
+ * which is what lets the validator accept a `create` at all.
+ */
+export function buildBriefingPlanningContext(input: BuildBriefingPlanningContextInput): {
+  context: BriefingPlanningContext;
+  state: PlanningState;
+} {
+  const { briefingText, ...base } = input;
+  const { context, state } = buildPlanningContext(base);
+  const { rules: _rules, ...rest } = context;
+  void _rules;
+  return {
+    context: {
+      ...rest,
+      rules: BRIEFING_PLANNING_RULES,
+      freeWindows: computeFreeWindows(base.tasks, base.now, base.dayBounds, base.timezone),
+      briefing: briefingText,
+    },
+    state: { ...state, creation: { briefingStatesClockTime: mentionsClockTime(briefingText) } },
+  };
 }

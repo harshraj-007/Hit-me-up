@@ -66,6 +66,7 @@ const PERSISTED: AiProposal = {
   createdAt: new Date("2026-10-01T09:00:00Z"),
   confirmedAt: null,
   appliedRevisionNumber: null,
+  briefingId: null,
 };
 
 describe("proposalViewFromGenerated", () => {
@@ -83,7 +84,9 @@ describe("proposalViewFromGenerated", () => {
       {
         ref: "t1",
         kind: "move",
+        taskId: "task-1",
         newStart: new Date("2026-10-01T20:00:00Z"),
+        create: null,
         reason: "You asked for gym after 8.",
       },
     ]);
@@ -124,7 +127,14 @@ describe("proposalViewFromPersisted", () => {
   it("maps a stored move — same displayable facts, minus the in-memory-only reason", () => {
     const view = proposalViewFromPersisted(PERSISTED, false);
     expect(view.accepted).toEqual([
-      { ref: "t1", kind: "move", newStart: new Date("2026-10-01T20:00:00.000Z"), reason: null },
+      {
+        ref: "t1",
+        kind: "move",
+        taskId: "task-1",
+        newStart: new Date("2026-10-01T20:00:00.000Z"),
+        create: null,
+        reason: null,
+      },
     ]);
     expect(view.rejectedMessages).toEqual(["Locked task can't move."]);
     expect(view.conflictCount).toBe(1);
@@ -156,5 +166,85 @@ describe("both mappers agree on the shape they produce", () => {
       accepted: v.accepted.map(({ reason: _reason, ...rest }) => rest),
     });
     expect(strip(fromGenerated)).toEqual(strip(fromPersisted));
+  });
+});
+
+describe("new tasks (Phase 8)", () => {
+  const CREATE = {
+    changeIndex: 0,
+    ref: "n1",
+    kind: "create" as const,
+    title: "Deep work",
+    start: new Date("2026-10-01T10:00:00Z"),
+    end: new Date("2026-10-01T11:00:00Z"),
+    durationMinutes: 60,
+    priority: "high" as const,
+    taskKind: "flexible" as const,
+    reason: "Morning gap.",
+  };
+
+  it("maps a freshly generated create: no task id, the full new-task view, the model's reason", () => {
+    const view = proposalViewFromGenerated(
+      { ...GENERATED, validation: { ...GENERATED.validation, accepted: [CREATE] } },
+      true,
+    );
+    expect(view.fromBriefing).toBe(true);
+    expect(view.accepted).toEqual([
+      {
+        ref: "n1",
+        kind: "create",
+        taskId: null,
+        newStart: null,
+        create: {
+          title: "Deep work",
+          start: CREATE.start,
+          end: CREATE.end,
+          durationMinutes: 60,
+          priority: "high",
+          taskKind: "flexible",
+        },
+        reason: "Morning gap.",
+      },
+    ]);
+  });
+
+  it("a resumed (persisted) create shows the same facts, deriving the end from start + minutes", () => {
+    const view = proposalViewFromPersisted(
+      {
+        ...PERSISTED,
+        briefingId: "b1",
+        changes: [
+          {
+            ref: "n1",
+            type: "create",
+            title: "Deep work",
+            start: "2026-10-01T10:00:00.000Z",
+            duration_minutes: 45,
+            priority: "low",
+            kind: "optional",
+          },
+          { ref: "t1", task_id: "task-1", type: "move", new_start: "2026-10-01T20:00:00.000Z" },
+        ],
+      },
+      false,
+    );
+    expect(view.fromBriefing).toBe(true);
+    expect(view.accepted[0]).toMatchObject({
+      kind: "create",
+      taskId: null,
+      create: {
+        title: "Deep work",
+        end: new Date("2026-10-01T10:45:00.000Z"),
+        durationMinutes: 45,
+        priority: "low",
+        taskKind: "optional",
+      },
+    });
+    expect(view.accepted[1]).toMatchObject({ kind: "move", taskId: "task-1", create: null });
+  });
+
+  it("an ordinary Ask-AI proposal is not marked as from a briefing", () => {
+    expect(proposalViewFromGenerated(GENERATED).fromBriefing).toBe(false);
+    expect(proposalViewFromPersisted(PERSISTED, false).fromBriefing).toBe(false);
   });
 });

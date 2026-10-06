@@ -41,6 +41,7 @@ const ROW = {
   created_at: "2026-10-01T09:00:00.000Z",
   confirmed_at: null,
   applied_revision_number: null,
+  briefing_id: null,
 };
 
 function fakeFrom(result: { data: unknown; error: unknown }, seen: string[] = []) {
@@ -97,7 +98,50 @@ describe("mapProposal (read boundary, exercised via findPendingProposal/getAiPro
       createdAt: new Date("2026-10-01T09:00:00.000Z"),
       confirmedAt: null,
       appliedRevisionNumber: null,
+      briefingId: null,
     });
+  });
+
+  it("reads a stored create change (Phase 8) through the same strict boundary", async () => {
+    const row = {
+      ...ROW,
+      briefing_id: "b1",
+      changes: [
+        {
+          ref: "n1",
+          type: "create",
+          title: "Deep work",
+          start: "2026-10-01T10:00:00.000Z",
+          duration_minutes: 60,
+          priority: "medium",
+          kind: "flexible",
+        },
+      ],
+    };
+    const proposal = await getAiProposalById(fakeFrom({ data: row, error: null }), "p1");
+    expect(proposal!.briefingId).toBe("b1");
+    expect(proposal!.changes[0]).toMatchObject({ type: "create", title: "Deep work" });
+  });
+
+  it("refuses a stored create carrying a field the wire shape doesn't have (e.g. an end or a source)", async () => {
+    for (const extra of [{ end: "2026-10-01T11:00:00Z" }, { source: "user" }, { notes: "x" }]) {
+      const row = {
+        ...ROW,
+        changes: [
+          {
+            ref: "n1",
+            type: "create",
+            title: "T",
+            start: "2026-10-01T10:00:00.000Z",
+            duration_minutes: 60,
+            priority: "medium",
+            kind: "flexible",
+            ...extra,
+          },
+        ],
+      };
+      await expect(getAiProposalById(fakeFrom({ data: row, error: null }), "p1")).rejects.toThrow();
+    }
   });
 
   it("null when the row doesn't exist (RLS-hidden or genuinely missing — indistinguishable)", async () => {
@@ -203,7 +247,26 @@ describe("createAiProposal", () => {
       p_rejected: VALIDATION.rejected,
       p_conflicts_after: VALIDATION.conflictsAfter,
       p_validation_status: "valid",
+      p_briefing_id: null,
     });
+  });
+
+  it("links the saved briefing a proposal was planned from (Phase 8) and sends nothing else new", async () => {
+    const rpc = vi.fn(async (_fn: string, _args: Record<string, unknown>) => ({
+      data: { ...ROW, briefing_id: "b1" },
+      error: null,
+    }));
+    const proposal = await createAiProposal({ rpc } as never, {
+      dayId: "d1",
+      source: "typed",
+      transcriptText: "Plan my day from my saved briefing",
+      understood: "ok",
+      unresolved: [],
+      validation: VALIDATION,
+      briefingId: "b1",
+    });
+    expect(rpc.mock.calls[0]![1]).toMatchObject({ p_briefing_id: "b1" });
+    expect(proposal.briefingId).toBe("b1");
   });
 
   it("sends an empty changes array when nothing was accepted (invalid/partially_valid persist too)", async () => {

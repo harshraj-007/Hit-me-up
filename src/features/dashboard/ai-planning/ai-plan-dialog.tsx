@@ -1,13 +1,14 @@
 "use client";
 
 import { useEffect, useMemo } from "react";
-import { Mic, Square, Type, X } from "lucide-react";
+import { CalendarPlus, Mic, Square, Type, X } from "lucide-react";
 import { Dialog } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import { useToast } from "@/components/ui/toast-provider";
 import { isVoiceCaptureSupported } from "@/lib/voice/speech-recognition";
-import { formatClock } from "@/lib/format/time";
-import { useAiPlanFlow } from "./use-ai-plan-flow";
+import { formatClock, formatRange } from "@/lib/format/time";
+import { useEntrance } from "@/lib/motion";
+import { useAiPlanFlow, type AiPlanMode } from "./use-ai-plan-flow";
 import type { ProposalView } from "./proposal-view";
 import type { ConfirmAiProposalOutcome } from "@/server/services/ai-confirmation";
 
@@ -15,6 +16,11 @@ export interface AiPlanDialogProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   planningDate: string;
+  /** `briefing` is "Plan my day": new tasks from the saved briefing (loaded by the server).
+   *  `ask` is the ordinary schedule-change request. One dialog, one review, one Apply either way. */
+  mode: AiPlanMode;
+  /** Titles of the day's own tasks by id, so a move reads "Gym → 8:00 PM", not an alias. */
+  taskTitles: ReadonlyMap<string, string>;
   /** The day's own frozen timezone — every proposed time is shown in it, never the browser's. */
   timezone: string;
   /** A proposal the server already found pending for this day (Phase 5.5 resume) — the dialog
@@ -39,12 +45,14 @@ export function AiPlanDialog({
   open,
   onOpenChange,
   planningDate,
+  mode,
+  taskTitles,
   timezone,
   resumedProposal,
   onApplied,
 }: AiPlanDialogProps) {
   const { toast } = useToast();
-  const flow = useAiPlanFlow({ planningDate, resumedProposal });
+  const flow = useAiPlanFlow({ planningDate, mode, resumedProposal });
   const { state } = flow;
   const voiceSupported = useMemo(() => isVoiceCaptureSupported(), []);
 
@@ -75,11 +83,45 @@ export function AiPlanDialog({
     <Dialog
       open={open}
       onOpenChange={onOpenChange}
-      title="Ask AI"
-      description="Describe a schedule change, by typing or speaking."
+      title={mode === "briefing" ? "Plan my day" : "Ask AI"}
+      description={
+        mode === "briefing"
+          ? "Turn your saved briefing into a proposed schedule. Nothing is added until you apply it."
+          : "Describe a schedule change, by typing or speaking."
+      }
     >
       <div className="flex flex-col gap-4">
-        {state.status === "idle" ? (
+        {state.status === "idle" && mode === "briefing" ? (
+          <div className="flex flex-col gap-3">
+            <Button onClick={() => void flow.planFromBriefing()}>
+              <CalendarPlus aria-hidden className="size-4" />
+              Plan from my briefing
+            </Button>
+            <p className="text-foreground-muted text-xs">
+              Want to steer it? Add a note first — type it or say it — then it plans from your
+              briefing and your note.
+            </p>
+            <div className="flex gap-2">
+              <Button variant="ghost" size="sm" onClick={flow.startTyping} className="flex-1">
+                <Type aria-hidden className="size-4" />
+                Add a note
+              </Button>
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={flow.startRecording}
+                disabled={!voiceSupported}
+                title={voiceSupported ? undefined : "Voice input isn't supported in this browser."}
+                className="flex-1"
+              >
+                <Mic aria-hidden className="size-4" />
+                Speak a note
+              </Button>
+            </div>
+          </div>
+        ) : null}
+
+        {state.status === "idle" && mode === "ask" ? (
           <div className="flex gap-2">
             <Button variant="secondary" onClick={flow.startTyping} className="flex-1">
               <Type aria-hidden className="size-4" />
@@ -132,6 +174,7 @@ export function AiPlanDialog({
           <TranscriptReview
             text={state.text}
             source={state.source}
+            briefingMode={mode === "briefing"}
             onChange={flow.editText}
             onCancel={flow.cancel}
             onSubmit={() => void flow.submit()}
@@ -147,6 +190,7 @@ export function AiPlanDialog({
         {state.status === "proposal_ready" ? (
           <ProposalReview
             view={state.view}
+            taskTitles={taskTitles}
             timezone={timezone}
             onCancel={flow.cancel}
             onApply={() => void flow.confirm()}
@@ -179,12 +223,14 @@ export function AiPlanDialog({
 function TranscriptReview({
   text,
   source,
+  briefingMode,
   onChange,
   onCancel,
   onSubmit,
 }: {
   text: string;
   source: "typed" | "voice";
+  briefingMode: boolean;
   onChange: (text: string) => void;
   onCancel: () => void;
   onSubmit: () => void;
@@ -192,14 +238,22 @@ function TranscriptReview({
   return (
     <div className="flex flex-col gap-3">
       <label className="flex flex-col gap-1.5 text-sm font-medium">
-        {source === "voice" ? "Transcript — edit if needed" : "What would you like to change?"}
+        {source === "voice"
+          ? "Transcript — edit if needed"
+          : briefingMode
+            ? "A note for the planner"
+            : "What would you like to change?"}
         <textarea
           autoFocus
           rows={4}
           maxLength={MAX_TRANSCRIPT_LENGTH}
           value={text}
           onChange={(event) => onChange(event.target.value)}
-          placeholder="e.g. Move gym to after 8pm, and unschedule my reading block."
+          placeholder={
+            briefingMode
+              ? "e.g. Keep the evening free, and do the hardest thing first."
+              : "e.g. Move gym to after 8pm, and unschedule my reading block."
+          }
           className="rounded-md border border-border bg-surface p-3 text-sm font-normal text-foreground focus:ring-2 focus:ring-accent focus:outline-none"
         />
       </label>
@@ -220,13 +274,28 @@ function TranscriptReview({
   );
 }
 
+const PRIORITY_LABEL = { high: "High", medium: "Medium", low: "Low" } as const;
+const KIND_LABEL = {
+  flexible: "Flexible",
+  deadline: "Deadline",
+  optional: "Optional",
+  fixed: "Fixed",
+} as const;
+
+/**
+ * The review answers four questions in order: what did the AI propose (its own words), which
+ * tasks are NEW, which existing tasks would MOVE, and exactly what Apply will do. Apply stays
+ * explicit and all-or-nothing: it is enabled only for a fully valid, current proposal.
+ */
 function ProposalReview({
   view,
+  taskTitles,
   timezone,
   onCancel,
   onApply,
 }: {
   view: ProposalView;
+  taskTitles: ReadonlyMap<string, string>;
   timezone: string;
   onCancel: () => void;
   onApply: () => void;
@@ -234,9 +303,20 @@ function ProposalReview({
   // Stale is checked first and independently of `status`: a resumed proposal can be `valid`
   // AND stale at once (it was valid when generated; the schedule just moved on since).
   const canApply = !view.isStale && view.status === "valid";
+  const scope = useEntrance<HTMLDivElement>({ selector: "[data-animate='row']", stagger: 0.04 });
+
+  const created = view.accepted.filter((c) => c.kind === "create" && c.create);
+  const changed = view.accepted.filter((c) => c.kind !== "create");
+  const moves = changed.filter((c) => c.kind === "move").length;
+  const unschedules = changed.length - moves;
+  const summary = [
+    created.length > 0 ? `${created.length} new task${created.length === 1 ? "" : "s"}` : null,
+    moves > 0 ? `${moves} move${moves === 1 ? "" : "s"}` : null,
+    unschedules > 0 ? `${unschedules} unscheduled` : null,
+  ].filter(Boolean);
 
   return (
-    <div className="flex flex-col gap-3">
+    <div ref={scope} className="flex flex-col gap-3">
       {view.isStale ? (
         <p className="rounded-md bg-surface p-2.5 text-sm text-status-late" role="status">
           This plan is outdated because your schedule changed. Generate a new plan.
@@ -245,27 +325,68 @@ function ProposalReview({
 
       <p className="text-sm text-foreground">{view.understood}</p>
 
-      {view.accepted.length > 0 ? (
-        <ul className="flex flex-col gap-1.5">
-          {view.accepted.map((change) => (
-            <li
-              key={change.ref}
-              className="rounded-md border border-border bg-surface px-3 py-2 text-sm"
-            >
-              {change.kind === "move" && change.newStart ? (
-                <>
-                  Move to{" "}
-                  <span className="font-medium">{formatClock(change.newStart, timezone)}</span>
-                </>
-              ) : (
-                <>Unschedule</>
-              )}
-              {change.reason ? (
-                <span className="text-foreground-muted block text-xs">{change.reason}</span>
-              ) : null}
-            </li>
-          ))}
-        </ul>
+      {created.length > 0 ? (
+        <section aria-label="New tasks" className="flex flex-col gap-1.5">
+          <h3 className="text-foreground-muted text-xs font-semibold tracking-wide uppercase">
+            New tasks
+          </h3>
+          <ul className="flex flex-col gap-1.5">
+            {created.map((change) => {
+              const task = change.create!;
+              return (
+                <li
+                  key={change.ref}
+                  data-animate="row"
+                  data-testid="proposed-new-task"
+                  className="rounded-md border border-l-2 border-border border-l-accent bg-surface px-3 py-2 text-sm"
+                >
+                  <span className="font-medium">{task.title}</span>
+                  <span className="text-foreground-muted block text-xs">
+                    {formatRange(task.start, task.end, timezone)} · {task.durationMinutes} min ·{" "}
+                    {PRIORITY_LABEL[task.priority]} priority · {KIND_LABEL[task.taskKind]}
+                  </span>
+                  {change.reason ? (
+                    <span className="text-foreground-muted block text-xs">{change.reason}</span>
+                  ) : null}
+                </li>
+              );
+            })}
+          </ul>
+        </section>
+      ) : null}
+
+      {changed.length > 0 ? (
+        <section aria-label="Changes to existing tasks" className="flex flex-col gap-1.5">
+          <h3 className="text-foreground-muted text-xs font-semibold tracking-wide uppercase">
+            Existing tasks
+          </h3>
+          <ul className="flex flex-col gap-1.5">
+            {changed.map((change) => (
+              <li
+                key={change.ref}
+                data-animate="row"
+                className="rounded-md border border-border bg-surface px-3 py-2 text-sm"
+              >
+                <span className="font-medium">
+                  {(change.taskId && taskTitles.get(change.taskId)) || "A task on this day"}
+                </span>
+                <span className="block text-xs">
+                  {change.kind === "move" && change.newStart ? (
+                    <>
+                      Move to{" "}
+                      <span className="font-medium">{formatClock(change.newStart, timezone)}</span>
+                    </>
+                  ) : (
+                    <>Unschedule</>
+                  )}
+                </span>
+                {change.reason ? (
+                  <span className="text-foreground-muted block text-xs">{change.reason}</span>
+                ) : null}
+              </li>
+            ))}
+          </ul>
+        </section>
       ) : null}
 
       {view.rejectedMessages.length > 0 ? (
@@ -300,6 +421,18 @@ function ProposalReview({
 
       {!canApply && view.accepted.length === 0 && !view.isStale ? (
         <p className="text-foreground-muted text-sm">Nothing here can be applied.</p>
+      ) : null}
+
+      {canApply && summary.length > 0 ? (
+        <p className="text-foreground-muted text-xs" data-testid="apply-summary">
+          Apply will add or change exactly this, all together: {summary.join(", ")}.
+        </p>
+      ) : null}
+      {!canApply && !view.isStale && view.accepted.length > 0 ? (
+        <p className="text-foreground-muted text-xs">
+          Something in this plan couldn&rsquo;t be accepted, so nothing will be applied. Cancel and
+          try again.
+        </p>
       ) : null}
 
       <div className="flex justify-end gap-2">

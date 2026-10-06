@@ -7,6 +7,7 @@ import {
   type AiProposalResult,
   type PendingAiProposal,
 } from "@/server/services/ai-planning";
+import { generateBriefingPlan } from "@/server/services/briefing-plan";
 import {
   confirmPersistedAiProposal,
   discardPersistedAiProposal,
@@ -28,6 +29,17 @@ export async function generateAiProposalAction(
   input: unknown,
 ): Promise<ActionResult<AiProposalResult>> {
   return runAction(() => generateAiProposal(input));
+}
+
+/**
+ * "Plan my day" (Phase 8). The input is `{id, planningDate, source, note}` — a date and an optional
+ * note, never the briefing: the server loads the caller's own saved briefing itself. Same
+ * confirmation path afterwards (`confirmAiProposalAction`); generating creates nothing.
+ */
+export async function generateBriefingPlanAction(
+  input: unknown,
+): Promise<ActionResult<AiProposalResult>> {
+  return runAction(() => generateBriefingPlan(input));
 }
 
 /** `planningDate` only — never a proposal id or a day id — matching every other action's

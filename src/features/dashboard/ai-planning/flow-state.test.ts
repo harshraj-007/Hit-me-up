@@ -13,10 +13,20 @@ const VIEW: ProposalView = {
   understood: "ok",
   unresolved: [],
   status: "valid",
-  accepted: [{ ref: "t1", kind: "move", newStart: new Date("2026-10-01T20:00:00Z"), reason: "x" }],
+  accepted: [
+    {
+      ref: "t1",
+      kind: "move",
+      taskId: "task-1",
+      newStart: new Date("2026-10-01T20:00:00Z"),
+      create: null,
+      reason: "x",
+    },
+  ],
   rejectedMessages: [],
   conflictCount: 0,
   baseRevision: 1,
+  fromBriefing: false,
   isStale: false,
 };
 const OUTCOME: ConfirmAiProposalOutcome = { revisionNumber: 2, tasks: [] };
@@ -341,6 +351,49 @@ describe("cannot skip the confirmation step", () => {
       { status: "proposal_ready", epoch: 1, source: "voice", text: "x", view: VIEW } as const,
     ]) {
       expect(reduceVoicePlan(state, { type: "confirmed", epoch: 1, outcome: OUTCOME })).toBe(state);
+    }
+  });
+});
+
+describe("Plan my day (start_briefing)", () => {
+  it("goes straight from idle to generating — no transcript step — as typed input with no text", () => {
+    const s = reduceVoicePlan(initialVoicePlanState, { type: "start_briefing", epoch: 1 });
+    expect(s).toEqual({ status: "generating", epoch: 1, source: "typed", text: "" });
+  });
+
+  it("then follows the SAME review → confirm chain as any proposal", () => {
+    let s = reduceVoicePlan(initialVoicePlanState, { type: "start_briefing", epoch: 1 });
+    s = reduceVoicePlan(s, { type: "proposal_ready", epoch: 1, view: VIEW });
+    expect(s.status).toBe("proposal_ready");
+    s = reduceVoicePlan(s, { type: "confirm", epoch: 1 });
+    expect(s.status).toBe("confirming");
+    s = reduceVoicePlan(s, { type: "confirmed", epoch: 1, outcome: OUTCOME });
+    expect(s.status).toBe("applied");
+  });
+
+  it("a result arriving after the user cancelled is dropped", () => {
+    let s = reduceVoicePlan(initialVoicePlanState, { type: "start_briefing", epoch: 1 });
+    s = reduceVoicePlan(s, { type: "cancel" });
+    const after = reduceVoicePlan(s, { type: "proposal_ready", epoch: 1, view: VIEW });
+    expect(after).toEqual(s);
+    expect(after.status).toBe("idle");
+  });
+
+  it("a failed generation lands in an error the user can dismiss", () => {
+    let s = reduceVoicePlan(initialVoicePlanState, { type: "start_briefing", epoch: 1 });
+    s = reduceVoicePlan(s, { type: "proposal_failed", epoch: 1, message: "busy" });
+    expect(s).toMatchObject({ status: "error", message: "busy" });
+    expect(reduceVoicePlan(s, { type: "reset" }).status).toBe("idle");
+  });
+
+  it("an invalid or stale proposal can never be confirmed, new tasks or not", () => {
+    for (const view of [
+      { ...VIEW, status: "partially_valid" as const },
+      { ...VIEW, isStale: true },
+    ]) {
+      let s = reduceVoicePlan(initialVoicePlanState, { type: "start_briefing", epoch: 1 });
+      s = reduceVoicePlan(s, { type: "proposal_ready", epoch: 1, view });
+      expect(reduceVoicePlan(s, { type: "confirm", epoch: 1 })).toEqual(s);
     }
   });
 });

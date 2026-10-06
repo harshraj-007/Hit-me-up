@@ -71,9 +71,11 @@ describe("golden scenario: assignment / gym / DSA / leave by 10", () => {
       [1, "unsupported_change"],
     ]);
     // DSA and the assignment are untouched: nothing accepted names them, durations intact.
-    expect(result.accepted.some((a) => a.taskId === dsa.id || a.taskId === assignment.id)).toBe(
-      false,
-    );
+    expect(
+      result.accepted.some(
+        (a) => a.kind !== "create" && (a.taskId === dsa.id || a.taskId === assignment.id),
+      ),
+    ).toBe(false);
     expect(result.conflictsAfter).toEqual([]);
   });
 

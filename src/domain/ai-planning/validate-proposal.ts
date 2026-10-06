@@ -2,16 +2,26 @@ import { detectScheduleConflicts, taskDurationMs, validateReschedule } from "@/d
 import { deriveTaskTemporalState, isResolved, type Task } from "@/domain/tasks";
 import { isAiMovable } from "./movability";
 import { parseLocalWallTime } from "./local-time";
+import { checkNewTaskTitle, normalizeTitleKey } from "./new-task";
 import {
+  MAX_NEW_TASK_MINUTES,
   MAX_PROPOSED_CHANGES,
+  MIN_NEW_TASK_MINUTES,
+  NEW_TASK_KINDS,
+  NEW_TASK_PRIORITIES,
   type ConflictAfter,
+  type CreateChange,
+  type MoveChange,
   type ParsedProposal,
   type PlanProposal,
   type PlanningState,
-  type ProposedTaskChange,
   type Rejection,
   type RejectionCode,
+  type UnscheduleChange,
   type ValidatedChange,
+  type ValidatedCreate,
+  type ValidatedMove,
+  type ValidatedUnschedule,
   type ValidationResult,
 } from "./types";
 
@@ -39,6 +49,17 @@ const MESSAGES = {
   duplicate_change: "The same task was changed more than once.",
   conflicting_changes: "The same task was given contradictory changes.",
   too_many_changes: `A proposal can change at most ${MAX_PROPOSED_CHANGES} tasks.`,
+  outside_planning_day: "A new task has to start and finish inside the planning day.",
+  in_the_past: "A new task can't start in the past.",
+  invalid_title: "A new task needs a short plain-text title.",
+  invalid_duration: `A new task must last between ${MIN_NEW_TASK_MINUTES} minutes and 24 hours.`,
+  invalid_priority: "That isn't a valid priority.",
+  invalid_task_kind: "That isn't a kind of task a plan can create.",
+  fixed_missing_time:
+    "A fixed task needs a time you gave yourself, and your briefing doesn't name one.",
+  duplicate_title: "A task with that title already exists, or was proposed twice.",
+  overlaps_existing: "That would overlap a task already on this day.",
+  overlaps_proposed: "Two new tasks would overlap each other.",
 } as const satisfies Partial<Record<RejectionCode, string>>;
 
 function reject(
@@ -97,10 +118,16 @@ export function validateProposal({ state, parsed }: ValidateProposalInput): Vali
   const tasksById = new Map(state.tasks.map((t) => [t.id, t]));
   const indexOf = (i: number) => sourceIndexes[i] ?? i;
 
-  // 1. Resolve refs through the server-held alias map only.
-  const resolved: { index: number; change: ProposedTaskChange; task: Task }[] = [];
+  // 1. Resolve refs through the server-held alias map only. A `create` names no existing task,
+  //    so it takes a separate path below.
+  const resolved: { index: number; change: MoveChange | UnscheduleChange; task: Task }[] = [];
+  const creates: { index: number; change: CreateChange }[] = [];
   proposal.changes.forEach((change, i) => {
     const index = indexOf(i);
+    if (change.kind === "create") {
+      creates.push({ index, change });
+      return;
+    }
     const taskId = state.refToTaskId.get(change.ref);
     const task = taskId === undefined ? undefined : tasksById.get(taskId);
     if (!task) {
@@ -132,17 +159,24 @@ export function validateProposal({ state, parsed }: ValidateProposalInput): Vali
     if ("code" in outcome) rejected.push(outcome);
     else accepted.push(outcome);
   }
+
+  // 3. New tasks are judged against the schedule the accepted moves would produce.
+  if (creates.length > 0) {
+    const { created, refused } = validateCreates(creates, state, scheduleAfter(state, accepted));
+    accepted.push(...created);
+    rejected.push(...refused);
+  }
   accepted.sort((a, b) => a.changeIndex - b.changeIndex);
 
   return finish(state, accepted, rejected);
 }
 
 function validateOne(
-  change: ProposedTaskChange,
+  change: MoveChange | UnscheduleChange,
   task: Task,
   index: number,
   state: PlanningState,
-): ValidatedChange | Rejection {
+): ValidatedMove | ValidatedUnschedule | Rejection {
   const ref = change.ref;
   if (isResolved(task.status)) return reject("resolved_task", MESSAGES.resolved_task, index, ref);
   if (task.scheduleLocked) return reject("locked_task", MESSAGES.locked_task, index, ref);
@@ -200,14 +234,12 @@ function finish(
   accepted: ValidatedChange[],
   rejected: Rejection[],
 ): ValidationResult {
-  const changed = new Map(accepted.map((c) => [c.taskId, c]));
-  const after = state.tasks.map((task) => {
-    const c = changed.get(task.id);
-    if (!c) return task;
-    return c.kind === "move"
-      ? { ...task, scheduledStart: c.newStart, scheduledEnd: c.newEnd, unscheduled: false }
-      : { ...task, unscheduled: true };
-  });
+  const changed = new Map(
+    accepted.flatMap((c) => (c.kind === "create" ? [] : [[c.taskId, c] as const])),
+  );
+  // New tasks are not in `after`: every accepted create was already checked, one by one, against
+  // exactly this schedule and against each other, so none can add a conflict.
+  const after = scheduleAfter(state, accepted);
 
   const refOf = new Map([...state.refToTaskId].map(([ref, id]) => [id, ref]));
   const conflictsAfter: ConflictAfter[] = detectScheduleConflicts(after, state.now).map((c) => ({
@@ -228,4 +260,171 @@ function finish(
         : "partially_valid";
 
   return { status, accepted, rejected, conflictsAfter, baseRevision: state.baseRevision };
+}
+
+/** The day's existing tasks as the accepted moves and unschedules would leave them. */
+function scheduleAfter(state: PlanningState, accepted: readonly ValidatedChange[]): Task[] {
+  const changed = new Map(
+    accepted.flatMap((c) => (c.kind === "create" ? [] : [[c.taskId, c] as const])),
+  );
+  return state.tasks.map((task) => {
+    const c = changed.get(task.id);
+    if (!c) return task;
+    return c.kind === "move"
+      ? { ...task, scheduledStart: c.newStart, scheduledEnd: c.newEnd, unscheduled: false }
+      : { ...task, unscheduled: true };
+  });
+}
+
+interface Candidate {
+  index: number;
+  change: CreateChange;
+  title: string;
+  start: Date;
+  end: Date;
+}
+
+/**
+ * Judges every proposed NEW task. Nothing the model said about time is taken on trust: the
+ * start is parsed through the day's own timezone, the end is `start + durationMinutes`, and the
+ * whole window must sit inside the planning day, not already have begun, and clear every live
+ * task (as the accepted moves leave them). Titles must be plain text and unique — against the
+ * day's existing tasks and against each other. A refused create is simply not accepted, so the
+ * result is never `valid`; the validator never trims, shifts or repairs a task to make it fit.
+ *
+ * Two creates that collide with EACH OTHER (same title, or overlapping windows) are both
+ * refused — as with a task named twice, it never picks a winner.
+ */
+function validateCreates(
+  creates: readonly { index: number; change: CreateChange }[],
+  state: PlanningState,
+  existing: readonly Task[],
+): { created: ValidatedCreate[]; refused: Rejection[] } {
+  const refused: Rejection[] = [];
+  const fail = (code: keyof typeof MESSAGES, index: number) =>
+    refused.push(reject(code, MESSAGES[code], index, null));
+
+  if (!state.creation) {
+    // The ordinary "Ask AI" flow never creates tasks, whatever a model sends: only a
+    // plan-from-briefing request sets a creation policy.
+    return {
+      created: [],
+      refused: creates.map(({ index }) =>
+        reject("unsupported_change", "That kind of change isn't supported here.", index, null),
+      ),
+    };
+  }
+
+  const dayStart = state.dayBounds.start.getTime();
+  const dayEnd = state.dayBounds.end.getTime();
+  const now = state.now.getTime();
+  const ownTitles = new Set(
+    state.tasks.filter((t) => t.dayId === state.dayId).map((t) => normalizeTitleKey(t.title)),
+  );
+  const live = existing.filter(
+    (t) => t.status === "upcoming" && !t.unscheduled && t.scheduledEnd.getTime() > now,
+  );
+
+  const candidates: Candidate[] = [];
+  for (const { index, change } of creates) {
+    const title = checkNewTaskTitle(change.title);
+    if (!title.ok) {
+      fail("invalid_title", index);
+      continue;
+    }
+    const minutes = change.durationMinutes;
+    if (
+      !Number.isInteger(minutes) ||
+      minutes < MIN_NEW_TASK_MINUTES ||
+      minutes > MAX_NEW_TASK_MINUTES
+    ) {
+      fail("invalid_duration", index);
+      continue;
+    }
+    if (!(NEW_TASK_PRIORITIES as readonly string[]).includes(change.priority)) {
+      fail("invalid_priority", index);
+      continue;
+    }
+    if (!(NEW_TASK_KINDS as readonly string[]).includes(change.taskKind)) {
+      fail("invalid_task_kind", index);
+      continue;
+    }
+    if (
+      change.taskKind === "fixed" &&
+      (change.timeStated !== true || !state.creation.briefingStatesClockTime)
+    ) {
+      fail("fixed_missing_time", index);
+      continue;
+    }
+    const start = parseLocalWallTime(change.start, state.timezone);
+    if (!start) {
+      fail("invalid_time", index);
+      continue;
+    }
+    const end = new Date(start.getTime() + minutes * 60_000);
+    if (start.getTime() < dayStart || end.getTime() > dayEnd) {
+      fail("outside_planning_day", index);
+      continue;
+    }
+    if (start.getTime() < now) {
+      fail("in_the_past", index);
+      continue;
+    }
+    if (ownTitles.has(normalizeTitleKey(title.title))) {
+      fail("duplicate_title", index);
+      continue;
+    }
+    if (
+      live.some(
+        (t) =>
+          t.scheduledStart.getTime() < end.getTime() && start.getTime() < t.scheduledEnd.getTime(),
+      )
+    ) {
+      fail("overlaps_existing", index);
+      continue;
+    }
+    candidates.push({ index, change, title: title.title, start, end });
+  }
+
+  // Against each other: first titles, then windows.
+  const byTitle = new Map<string, Candidate[]>();
+  for (const c of candidates)
+    byTitle.set(normalizeTitleKey(c.title), [
+      ...(byTitle.get(normalizeTitleKey(c.title)) ?? []),
+      c,
+    ]);
+  const dupes = new Set<Candidate>();
+  for (const group of byTitle.values()) if (group.length > 1) group.forEach((c) => dupes.add(c));
+  dupes.forEach((c) => fail("duplicate_title", c.index));
+
+  const survivors = candidates.filter((c) => !dupes.has(c));
+  const colliding = new Set<Candidate>();
+  for (let i = 0; i < survivors.length; i++) {
+    for (let j = i + 1; j < survivors.length; j++) {
+      const a = survivors[i]!;
+      const b = survivors[j]!;
+      if (a.start < b.end && b.start < a.end) {
+        colliding.add(a);
+        colliding.add(b);
+      }
+    }
+  }
+  colliding.forEach((c) => fail("overlaps_proposed", c.index));
+
+  const created: ValidatedCreate[] = survivors
+    .filter((c) => !colliding.has(c))
+    .sort((a, b) => a.index - b.index)
+    .map((c, i) => ({
+      kind: "create" as const,
+      changeIndex: c.index,
+      ref: `n${i + 1}`,
+      title: c.title,
+      start: c.start,
+      end: c.end,
+      durationMinutes: c.change.durationMinutes,
+      priority: c.change.priority,
+      taskKind: c.change.taskKind,
+      reason: c.change.reason,
+    }));
+  return { created, refused };
 }

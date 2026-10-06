@@ -256,24 +256,45 @@ export async function applyReplan(
   return data;
 }
 
-/** Wire shape of one element of confirm_ai_proposal()'s `p_changes` (snake_case, ISO strings).
- *  `new_start` is present only for a `move` — never an end time, never a duration. */
-export interface ConfirmChangeRow {
-  ref: string;
-  task_id: string;
-  type: "move" | "unschedule";
-  new_start?: string;
-}
+/** Wire shape of one element of the confirmation RPCs' `p_changes` (snake_case, ISO strings).
+ *  A move carries only `new_start` — never an end, never a duration. A `create` (Phase 8) is a NEW
+ *  task: no task id, a server-assigned `n1`… ref, a duration in minutes, and none of end / source /
+ *  notes / status, which cannot be expressed at all. */
+export type ConfirmChangeRow =
+  | { ref: string; task_id: string; type: "move"; new_start: string }
+  | { ref: string; task_id: string; type: "unschedule" }
+  | {
+      ref: string;
+      type: "create";
+      title: string;
+      start: string;
+      duration_minutes: number;
+      priority: "high" | "medium" | "low";
+      kind: "flexible" | "deadline" | "optional" | "fixed";
+    };
 
 export function toConfirmChangeRow(change: ConfirmationChange): ConfirmChangeRow {
-  return change.kind === "move"
-    ? {
+  switch (change.kind) {
+    case "move":
+      return {
         ref: change.ref,
         task_id: change.taskId,
         type: "move",
         new_start: change.newStart.toISOString(),
-      }
-    : { ref: change.ref, task_id: change.taskId, type: "unschedule" };
+      };
+    case "unschedule":
+      return { ref: change.ref, task_id: change.taskId, type: "unschedule" };
+    case "create":
+      return {
+        ref: change.ref,
+        type: "create",
+        title: change.title,
+        start: change.start.toISOString(),
+        duration_minutes: change.durationMinutes,
+        priority: change.priority,
+        kind: change.taskKind,
+      };
+  }
 }
 
 /**

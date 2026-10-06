@@ -185,6 +185,7 @@ const PROPOSAL = {
   createdAt: new Date("2026-10-01T09:00:00.000Z"),
   confirmedAt: null,
   appliedRevisionNumber: null,
+  briefingId: null,
 };
 
 describe("confirmPersistedAiProposal (Phase 5.5, the app's real confirmation path)", () => {

@@ -45,7 +45,7 @@ Rules:
 - "understood" is one or two plain sentences saying what you understood the request to be.`;
 
 /** JSON that cannot close or forge a delimiter: angle brackets are escaped (still valid JSON). */
-function encode(value: unknown, indent?: number): string {
+export function encode(value: unknown, indent?: number): string {
   return JSON.stringify(value, null, indent).replace(/</g, "\\u003c").replace(/>/g, "\\u003e");
 }
 

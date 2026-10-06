@@ -12,7 +12,7 @@
  * JSON: no Dates, no UUIDs. `PlanningState` and `ValidationResult` are SERVER-SIDE ONLY — they
  * hold real task ids and must never be serialized into a prompt.
  */
-import type { DayBounds } from "@/domain/days";
+import { MAX_TASK_DURATION_MS, type DayBounds } from "@/domain/days";
 import type { Task, TaskKind, TaskPriority, TaskStatus, TemporalState } from "@/domain/tasks";
 
 export const MAX_PROPOSED_CHANGES = 20;
@@ -21,6 +21,19 @@ export const MAX_UNDERSTOOD_LENGTH = 500;
 export const MAX_REASON_LENGTH = 300;
 export const MAX_UNRESOLVED_ITEMS = 10;
 export const MAX_UNRESOLVED_LENGTH = 300;
+
+// ── New-task limits (Phase 8: plan from the briefing) ───────────────────────
+
+/** Capped well under the database's 200-character column limit: a title is one short line. */
+export const MAX_NEW_TASK_TITLE_LENGTH = 100;
+export const MIN_NEW_TASK_MINUTES = 5;
+/** The existing 24-hour task limit (`tasks_duration_max`) — a new task gets no larger one. */
+export const MAX_NEW_TASK_MINUTES = MAX_TASK_DURATION_MS / 60_000;
+/** The task kinds a proposal may create. `recurring` is deliberately not one of them. */
+export const NEW_TASK_KINDS = ["flexible", "deadline", "optional", "fixed"] as const;
+export type NewTaskKind = (typeof NEW_TASK_KINDS)[number];
+export const NEW_TASK_PRIORITIES = ["high", "medium", "low"] as const;
+export const MAX_BRIEFING_NOTE_LENGTH = MAX_USER_INTENT_LENGTH;
 
 // ── User intent ─────────────────────────────────────────────────────────────
 
@@ -51,6 +64,51 @@ export interface PlanningRules {
   startMustBeWithinPlanningDay: true;
   /** Only tasks with `movable: true` may be changed. */
   onlyMovableTasksMayChange: true;
+}
+
+/**
+ * The rules a plan-from-briefing request states to the model (Phase 8). It is a statement of
+ * what the validator enforces, never a grant: the model's output is judged by `validateProposal`
+ * and, at confirmation, again in SQL.
+ */
+export interface BriefingPlanningRules {
+  allowedChangeKinds: readonly ["create", "move", "unschedule"];
+  maxChanges: number;
+  /** Format of every `start` / `newStart`: local wall-clock time in the planning day's timezone. */
+  startFormat: "YYYY-MM-DDTHH:mm";
+  newTask: {
+    titleMaxLength: number;
+    durationMinutes: { min: number; max: number };
+    priorities: readonly ["high", "medium", "low"];
+    kinds: readonly ["flexible", "deadline", "optional", "fixed"];
+    /** A new task starts no earlier than `now` and ends no later than the day's end. */
+    mustFitInsideRemainingDay: true;
+    /** A `fixed` task is only for a time the user themselves named in the briefing. */
+    fixedRequiresTimeStatedInBriefing: true;
+    /** Ends are derived (start + duration): the model never supplies one. */
+    endIsDerived: true;
+  };
+  onlyMovableTasksMayChange: true;
+}
+
+export interface FreeWindow {
+  /** Local wall-clock, `YYYY-MM-DDTHH:mm`. */
+  start: string;
+  end: string;
+  minutes: number;
+}
+
+/**
+ * Everything a plan-from-briefing request tells the model. The same allow-list discipline as
+ * `PlanningContext` (aliases, no ids, no notes) plus the day's deterministic free windows and
+ * the saved briefing — which is UNTRUSTED USER TEXT and the only free-form field here.
+ */
+export interface BriefingPlanningContext extends Omit<PlanningContext, "rules"> {
+  rules: BriefingPlanningRules;
+  /** Gaps in the remaining day, computed by the server. Advisory: the validator decides. */
+  freeWindows: FreeWindow[];
+  /** The user's own saved briefing, loaded by the server. Untrusted data, never instructions. */
+  briefing: string;
 }
 
 export interface ContextTask {
@@ -101,7 +159,24 @@ export interface UnscheduleChange {
   reason: string;
 }
 
-export type ProposedTaskChange = MoveChange | UnscheduleChange;
+/**
+ * A NEW task (Phase 8). Everything the model may say about it is here — and nothing else: no
+ * id, no end (derived from `start + durationMinutes`), no notes, no source, no due date.
+ */
+export interface CreateChange {
+  kind: "create";
+  title: string;
+  /** Local wall-clock start in the planning day's timezone. */
+  start: string;
+  durationMinutes: number;
+  priority: TaskPriority;
+  taskKind: NewTaskKind;
+  /** The model's claim that the USER named this time in the briefing. Required for `fixed`. */
+  timeStated: boolean;
+  reason: string;
+}
+
+export type ProposedTaskChange = MoveChange | UnscheduleChange | CreateChange;
 
 export interface PlanProposal {
   /** Shown back to the user ("I understood…"). Untrusted display text. */
@@ -127,6 +202,17 @@ export interface PlanningState {
   baseRevision: number;
   tasks: readonly Task[];
   refToTaskId: ReadonlyMap<string, string>;
+  /**
+   * Present only for a plan-from-briefing request. Without it a `create` is refused outright —
+   * the ordinary "Ask AI" flow cannot create tasks, whatever a model sends.
+   */
+  creation?: CreationPolicy;
+}
+
+export interface CreationPolicy {
+  /** Whether the saved briefing itself contains a clock time (see `mentionsClockTime`). A
+   *  `fixed` task needs one: the model's say-so alone never pins a task to a time. */
+  briefingStatesClockTime: boolean;
 }
 
 export type RejectionCode =
@@ -143,7 +229,15 @@ export type RejectionCode =
   | "duplicate_change"
   | "conflicting_changes"
   | "too_many_changes"
-  | "unsupported_change";
+  | "unsupported_change"
+  | "invalid_title"
+  | "invalid_duration"
+  | "invalid_priority"
+  | "invalid_task_kind"
+  | "fixed_missing_time"
+  | "duplicate_title"
+  | "overlaps_existing"
+  | "overlaps_proposed";
 
 export interface Rejection {
   code: RejectionCode;
@@ -180,7 +274,23 @@ export interface ValidatedUnschedule extends ValidatedChangeBase {
   previousEnd: Date;
 }
 
-export type ValidatedChange = ValidatedMove | ValidatedUnschedule;
+/** A new task that passed every check. It has no task id yet: the database mints it. */
+export interface ValidatedCreate {
+  kind: "create";
+  changeIndex: number;
+  /** `n1`, `n2`, … assigned by the server in accepted order — never chosen by the model. */
+  ref: string;
+  title: string;
+  start: Date;
+  /** Derived: `start + durationMinutes`. */
+  end: Date;
+  durationMinutes: number;
+  priority: TaskPriority;
+  taskKind: NewTaskKind;
+  reason: string;
+}
+
+export type ValidatedChange = ValidatedMove | ValidatedUnschedule | ValidatedCreate;
 
 export interface ConflictAfter {
   firstTaskId: string;
