@@ -25,7 +25,7 @@ import { markNotificationSent } from "@/server/db/repositories/scheduled-notific
 import { InternalError } from "@/server/errors";
 import type { ScheduledNotification } from "@/server/db/repositories/scheduled-notifications";
 import type { PushSubscription } from "@/server/db/repositories/push-subscriptions";
-import { deliverClaimedNotifications } from "./notification-delivery";
+import { FRESH_SUBSCRIPTION_GRACE_MS, deliverClaimedNotifications } from "./notification-delivery";
 
 const CONFIG = { publicKey: "pub", privateKey: "priv", subject: "mailto:test@example.test" };
 const SUPABASE = { marker: "service-role-client" } as never;
@@ -349,5 +349,100 @@ describe("deliverClaimedNotifications — payload never leaks task notes or iden
     expect(payload.userId).toBeUndefined();
     expect(payload.notes).toBeUndefined();
     expect(payload).toMatchObject({ type: "task_reminder", title: "Task reminder" });
+  });
+});
+
+describe("deliverClaimedNotifications — a freshly registered subscription's 404/410 is not believed yet", () => {
+  // Real-push-service behavior found by end-to-end verification: a brand-new registration answers 410 for
+  // a few seconds, then 201. Revoking it on that first answer silently drops a working subscription.
+  const NOW = new Date("2026-10-06T12:00:00Z");
+  const now = () => NOW;
+  const ago = (ms: number) => new Date(NOW.getTime() - ms);
+
+  it.each([404, 410])(
+    "HTTP %s inside the grace window: NOT revoked, counted as transient, notification left retryable",
+    async (statusCode) => {
+      vi.mocked(listActiveSubscriptionsForUser).mockResolvedValue([
+        makeSubscription({ id: "sub-new", lastSeenAt: ago(5_000) }),
+      ]);
+      vi.mocked(sendWebPush).mockResolvedValue({ outcome: "permanently_invalid", statusCode });
+      const [outcome] = await deliverClaimedNotifications(SUPABASE, [makeNotification()], { now });
+      expect(revokePushSubscriptionById).not.toHaveBeenCalled();
+      expect(markNotificationSent).not.toHaveBeenCalled();
+      expect(outcome).toMatchObject({
+        delivered: false,
+        permanentlyInvalid: 0,
+        transientFailures: 1,
+      });
+    },
+  );
+
+  it("the window's edge: just inside is not believed, exactly at it (and beyond) is", async () => {
+    vi.mocked(sendWebPush).mockResolvedValue({ outcome: "permanently_invalid", statusCode: 410 });
+
+    vi.mocked(listActiveSubscriptionsForUser).mockResolvedValue([
+      makeSubscription({ id: "sub-edge", lastSeenAt: ago(FRESH_SUBSCRIPTION_GRACE_MS - 1) }),
+    ]);
+    await deliverClaimedNotifications(SUPABASE, [makeNotification()], { now });
+    expect(revokePushSubscriptionById).not.toHaveBeenCalled();
+
+    vi.mocked(listActiveSubscriptionsForUser).mockResolvedValue([
+      makeSubscription({ id: "sub-edge", lastSeenAt: ago(FRESH_SUBSCRIPTION_GRACE_MS) }),
+    ]);
+    await deliverClaimedNotifications(SUPABASE, [makeNotification()], { now });
+    expect(revokePushSubscriptionById).toHaveBeenCalledExactlyOnceWith(SUPABASE, "sub-edge");
+  });
+
+  it("an old dead subscription is still revoked in the same fan-out as a fresh one that is not", async () => {
+    vi.mocked(listActiveSubscriptionsForUser).mockResolvedValue([
+      makeSubscription({ id: "sub-old-dead", lastSeenAt: ago(60 * 60_000) }),
+      makeSubscription({ id: "sub-new-gone", lastSeenAt: ago(3_000) }),
+      makeSubscription({ id: "sub-live", lastSeenAt: ago(60 * 60_000) }),
+    ]);
+    vi.mocked(sendWebPush).mockImplementation(async (_c, sub) =>
+      sub.endpoint.includes("live")
+        ? { outcome: "success", statusCode: 201 }
+        : { outcome: "permanently_invalid", statusCode: 410 },
+    );
+    const [outcome] = await deliverClaimedNotifications(SUPABASE, [makeNotification()], { now });
+    expect(revokePushSubscriptionById).toHaveBeenCalledExactlyOnceWith(SUPABASE, "sub-old-dead");
+    expect(outcome).toMatchObject({
+      delivered: true,
+      successes: 1,
+      permanentlyInvalid: 1,
+      transientFailures: 1,
+    });
+  });
+
+  it("a freshly re-registered OLD row counts as fresh (re-registration refreshes last_seen_at)", async () => {
+    vi.mocked(listActiveSubscriptionsForUser).mockResolvedValue([
+      makeSubscription({
+        id: "sub-reenabled",
+        createdAt: ago(30 * 24 * 60 * 60_000),
+        lastSeenAt: ago(2_000),
+      }),
+    ]);
+    vi.mocked(sendWebPush).mockResolvedValue({ outcome: "permanently_invalid", statusCode: 410 });
+    await deliverClaimedNotifications(SUPABASE, [makeNotification()], { now });
+    expect(revokePushSubscriptionById).not.toHaveBeenCalled();
+  });
+
+  it("does not affect a fresh subscription that succeeds", async () => {
+    vi.mocked(listActiveSubscriptionsForUser).mockResolvedValue([
+      makeSubscription({ id: "sub-new", lastSeenAt: ago(1_000) }),
+    ]);
+    vi.mocked(sendWebPush).mockResolvedValue({ outcome: "success", statusCode: 201 });
+    const [outcome] = await deliverClaimedNotifications(SUPABASE, [makeNotification()], { now });
+    expect(outcome).toMatchObject({ delivered: true, successes: 1 });
+    expect(markNotificationSent).toHaveBeenCalledTimes(1);
+  });
+
+  it("uses the real clock by default (a subscription registered just now is fresh)", async () => {
+    vi.mocked(listActiveSubscriptionsForUser).mockResolvedValue([
+      makeSubscription({ id: "sub-now", lastSeenAt: new Date() }),
+    ]);
+    vi.mocked(sendWebPush).mockResolvedValue({ outcome: "permanently_invalid", statusCode: 410 });
+    await deliverClaimedNotifications(SUPABASE, [makeNotification()]);
+    expect(revokePushSubscriptionById).not.toHaveBeenCalled();
   });
 });

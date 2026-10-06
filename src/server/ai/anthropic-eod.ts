@@ -35,7 +35,7 @@ export interface AnthropicEodDeps {
 /**
  * The Anthropic implementation of `EodInterpreter`. Thin on purpose, like the planning adapter it
  * sits beside (and reuses the failure classification of): one request (static system prompt,
- * delimited data, one forced tool that can only emit interpretation text), ONE call, and the
+ * delimited data, one forced tool that can only emit interpretation text), ONE logical call (the SDK may itself retry a 429/5xx within the overall budget), and the
  * tool's payload handed back untouched as `unknown`. It does not parse, validate, or persist.
  */
 export function createAnthropicEodInterpreter(deps: AnthropicEodDeps = {}): EodInterpreter {

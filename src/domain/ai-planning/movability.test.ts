@@ -58,7 +58,8 @@ describe("the deterministic planner's rule is untouched", () => {
     // — all new, separate functions; apply_replan() itself is untouched by any of them — plus
     // the two Phase 6 live-verification follow-ups (service_role grant hardening; the overlapping-
     // cron creation race), which only revoke privileges / re-declare the reconcile function, and
-    // Phase 7's eod_reports table + create_eod_report() — all new objects.
-    expect(fs.readdirSync(dir)).toHaveLength(14);
+    // Phase 7's eod_reports table + create_eod_report() — all new objects — plus the two reconcile
+    // fixes real end-to-end verification found (no re-send after a terminal state; lapse after start).
+    expect(fs.readdirSync(dir)).toHaveLength(16);
   });
 });

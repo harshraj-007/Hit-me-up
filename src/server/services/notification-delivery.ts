@@ -49,6 +49,21 @@ import type { SupabaseServiceRoleClient } from "@/server/db/supabase-service-rol
  * and does not claim, exactly-once delivery at any layer.
  */
 
+/**
+ * How long after a subscription is registered (or re-registered) a 404/410 from the push service is
+ * NOT believed. Found by real end-to-end verification against Google's push service: a brand-new
+ * subscription answered HTTP 410 to its first sends for a few seconds, then 201 — the registration had
+ * not finished propagating. Treating that 410 as permanent revoked a perfectly good subscription on its
+ * first use, while the browser (the source of truth for the "Notifications on" control) still held it:
+ * the UI said on, the server had silently dropped it, and every later reminder was lost until the user
+ * toggled it off and on. Inside this window a 404/410 is handled like any other transient failure —
+ * nothing is revoked and the notification stays retryable; a subscription that is really dead keeps
+ * answering 404/410 and is revoked on the first send after the window. Measured propagation was ~4 s;
+ * two minutes is deliberately generous, and costs only a short revocation delay for a genuinely dead
+ * subscription that was registered in the last two minutes.
+ */
+export const FRESH_SUBSCRIPTION_GRACE_MS = 2 * 60_000;
+
 export interface NotificationDeliveryOutcome {
   notificationId: string;
   /** True iff at least one subscription's provider acceptance succeeded — NOT proof the user
@@ -68,6 +83,7 @@ export interface NotificationDeliveryOutcome {
 export async function deliverClaimedNotifications(
   supabase: SupabaseServiceRoleClient,
   claimed: readonly ScheduledNotification[],
+  deps: { now?: () => Date } = {},
 ): Promise<NotificationDeliveryOutcome[]> {
   if (claimed.length === 0) return [];
 
@@ -76,7 +92,7 @@ export async function deliverClaimedNotifications(
 
   const outcomes: NotificationDeliveryOutcome[] = [];
   for (const notification of claimed) {
-    outcomes.push(await deliverOne(supabase, config, notification));
+    outcomes.push(await deliverOne(supabase, config, notification, deps.now ?? (() => new Date())));
   }
   return outcomes;
 }
@@ -85,6 +101,7 @@ async function deliverOne(
   supabase: SupabaseServiceRoleClient,
   config: WebPushConfig,
   notification: ScheduledNotification,
+  now: () => Date,
 ): Promise<NotificationDeliveryOutcome> {
   const empty: NotificationDeliveryOutcome = {
     notificationId: notification.id,
@@ -136,9 +153,20 @@ async function deliverOne(
     if (result.outcome === "success") {
       successes += 1;
     } else if (result.outcome === "permanently_invalid") {
-      permanentlyInvalid += 1;
-      // One dead subscription must never stop the loop — fan-out continues regardless.
-      await revokePushSubscriptionById(supabase, subscription.id);
+      if (now().getTime() - subscription.lastSeenAt.getTime() < FRESH_SUBSCRIPTION_GRACE_MS) {
+        // Too new to believe "gone" — see FRESH_SUBSCRIPTION_GRACE_MS. Not revoked, not counted as
+        // permanent: it is a transient failure for this notification, retried on a later tick.
+        transientFailures += 1;
+        logger.info("notification delivery: fresh subscription reported gone, not revoking", {
+          notificationId: notification.id,
+          subscriptionId: subscription.id,
+          statusCode: result.statusCode,
+        });
+      } else {
+        permanentlyInvalid += 1;
+        // One dead subscription must never stop the loop — fan-out continues regardless.
+        await revokePushSubscriptionById(supabase, subscription.id);
+      }
     } else {
       transientFailures += 1;
     }

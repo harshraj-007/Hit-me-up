@@ -422,6 +422,142 @@ begin
 end $$;
 do $$ begin raise notice 'CASE 18b: an abandoned claim with no attempts left expires, not stuck forever — OK'; end $$;
 
+-- ── Cases 27–29: a FINISHED reminder is never re-created for the same schedule ──────────────
+-- Found by real end-to-end verification (see 20261006120000): reconcile's "no active reminder"
+-- guard ignored terminal rows, so a SENT reminder was re-created and re-sent on every cron tick, and
+-- an EXPIRED one escaped its attempt cap. No earlier case ran reconcile AFTER a terminal state.
+-- The 'due now' task is still upcoming, in the future, and unchanged, and its row is 'expired' (18b).
+do $$
+declare v_task uuid := (select id from public.tasks where title = 'due now'); n int; claimed int;
+begin
+  select count(*) into claimed from public.reconcile_and_claim_notifications();
+  select count(*) into n from public.scheduled_notifications where task_id = v_task;
+  if n <> 1 or claimed <> 0 or (select status from public.scheduled_notifications where task_id = v_task) <> 'expired' then
+    raise exception 'CASE 27 FAILED: an EXPIRED reminder was replaced by a new one (rows=%, claimed=%)', n, claimed;
+  end if;
+  raise notice 'CASE 27: an expired reminder is not replaced — the attempt cap actually holds — OK';
+end $$;
+
+-- Drive the same row through the real finalizer: claimed -> mark_notification_sent -> reconcile again.
+reset role;
+update public.scheduled_notifications
+   set status = 'claimed', claimed_at = now(), resolved_at = null
+ where task_id = (select id from public.tasks where title = 'due now');
+set local role service_role;
+select set_config('request.jwt.claims', json_build_object('role', 'service_role')::text, true);
+do $$
+declare v_task uuid := (select id from public.tasks where title = 'due now'); n int; claimed int;
+begin
+  perform public.mark_notification_sent((select id from public.scheduled_notifications where task_id = v_task));
+  if (select status from public.scheduled_notifications where task_id = v_task) <> 'sent' then
+    raise exception 'CASE 28 FAILED: setup — mark_notification_sent did not mark the row sent';
+  end if;
+  for i in 1..3 loop
+    select count(*) into claimed from public.reconcile_and_claim_notifications();
+    if claimed <> 0 then raise exception 'CASE 28 FAILED: tick % re-claimed a reminder that was already sent', i; end if;
+  end loop;
+  select count(*) into n from public.scheduled_notifications where task_id = v_task;
+  if n <> 1 then raise exception 'CASE 28 FAILED: repeated reconciliation re-created a SENT reminder (rows=%)', n; end if;
+  raise notice 'CASE 28: a sent reminder is not re-created or re-sent on later ticks — OK';
+end $$;
+
+-- A task moved to a DIFFERENT start has not been reminded about that time yet: it earns a new one.
+reset role;
+update public.tasks
+   set scheduled_start = scheduled_start + interval '1 hour', scheduled_end = scheduled_end + interval '1 hour'
+ where title = 'due now';
+set local role service_role;
+select set_config('request.jwt.claims', json_build_object('role', 'service_role')::text, true);
+do $$
+declare v_task uuid := (select id from public.tasks where title = 'due now'); n int;
+begin
+  perform public.reconcile_and_claim_notifications();
+  select count(*) into n from public.scheduled_notifications where task_id = v_task;
+  if n <> 2
+     or (select count(*) from public.scheduled_notifications where task_id = v_task and status = 'sent') <> 1
+     or (select count(*) from public.scheduled_notifications sn join public.tasks t on t.id = sn.task_id
+          where sn.task_id = v_task and sn.status = 'scheduled'
+            and sn.task_scheduled_start_snapshot = t.scheduled_start
+            and sn.fire_at = t.scheduled_start - interval '10 minutes') <> 1 then
+    raise exception 'CASE 29 FAILED: a task moved after its reminder was sent did not get exactly one new, correctly timed reminder (rows=%)', n;
+  end if;
+  raise notice 'CASE 29: moving a task after its reminder was sent earns one new reminder for the new time — OK';
+end $$;
+
+-- ── Cases 30–32: a reminder is never delivered after its task has STARTED ───────────────────
+-- Found by real end-to-end verification (see 20261006130000): with cron down until the task was
+-- underway, "<task> starts in 10 minutes" was delivered AFTER it started. Nothing bounded a
+-- reminder from above. The 'due now' task currently has a live, future 'scheduled' row (case 29).
+reset role;
+update public.tasks
+   set scheduled_start = now() - interval '5 minutes', scheduled_end = now() + interval '25 minutes'
+ where title = 'due now';
+set local role service_role;
+select set_config('request.jwt.claims', json_build_object('role', 'service_role')::text, true);
+do $$
+declare v_task uuid := (select id from public.tasks where title = 'due now'); claimed int;
+begin
+  select count(*) into claimed from public.reconcile_and_claim_notifications();
+  if claimed <> 0 then
+    raise exception 'CASE 30 FAILED: a reminder was claimed for a task that has already started';
+  end if;
+  if (select count(*) from public.scheduled_notifications where task_id = v_task and status = 'expired') < 1
+     or (select count(*) from public.scheduled_notifications where task_id = v_task and status in ('scheduled','claimed')) <> 0 then
+    raise exception 'CASE 30 FAILED: the reminder for a started task did not lapse (statuses: %)',
+      (select array_agg(status order by created_at) from public.scheduled_notifications where task_id = v_task);
+  end if;
+  -- ...and repeated ticks neither resurrect nor re-create it.
+  perform public.reconcile_and_claim_notifications();
+  if (select count(*) from public.scheduled_notifications where task_id = v_task and status in ('scheduled','claimed')) <> 0 then
+    raise exception 'CASE 30 FAILED: a lapsed reminder was re-created on a later tick';
+  end if;
+  raise notice 'CASE 30: a reminder is not claimed once its task has started; it lapses (expired) — OK';
+end $$;
+
+-- A task that has NOT started keeps its reminder, due or not: the lapse rule must not over-reach.
+reset role;
+set local role authenticated;
+select set_config('request.jwt.claims',
+  json_build_object('sub', '00000000-0000-0000-0000-0000000000a1', 'role', 'authenticated')::text, true);
+select id as future_task_id from public.create_task_with_history(
+  :'a_day_id', 'lapse control', null, 'medium', 'flexible',
+  now() + interval '30 minutes', now() + interval '50 minutes', null, 'user'
+) \gset
+reset role;
+set local role service_role;
+select set_config('request.jwt.claims', json_build_object('role', 'service_role')::text, true);
+do $$
+begin
+  perform public.reconcile_and_claim_notifications();
+  if (select status from public.scheduled_notifications
+       where task_id = (select id from public.tasks where title = 'lapse control')) is distinct from 'scheduled' then
+    raise exception 'CASE 31 FAILED: the lapse rule touched a reminder for a task that has not started';
+  end if;
+  raise notice 'CASE 31: a not-yet-started task keeps its scheduled reminder — OK';
+end $$;
+
+-- A stale abandoned claim for a task that has since started: recovered by step 1a, but must lapse, not retry.
+reset role;
+update public.scheduled_notifications
+   set status = 'claimed', claimed_at = now() - interval '10 minutes', attempt_count = 1
+ where task_id = (select id from public.tasks where title = 'lapse control');
+update public.tasks
+   set scheduled_start = now() - interval '2 minutes', scheduled_end = now() + interval '28 minutes'
+ where title = 'lapse control';
+set local role service_role;
+select set_config('request.jwt.claims', json_build_object('role', 'service_role')::text, true);
+do $$
+declare claimed int;
+begin
+  select count(*) into claimed from public.reconcile_and_claim_notifications();
+  if claimed <> 0
+     or (select status from public.scheduled_notifications
+          where task_id = (select id from public.tasks where title = 'lapse control')) is distinct from 'expired' then
+    raise exception 'CASE 32 FAILED: an abandoned claim for a started task was retried instead of lapsing (claimed=%)', claimed;
+  end if;
+  raise notice 'CASE 32: an abandoned claim for a task that has since started lapses instead of being retried — OK';
+end $$;
+
 -- ── Case 26: reconciliation never writes to tasks or task_history ───────────────────────────
 do $$
 declare v_task_count_before int; v_history_count_before int;
