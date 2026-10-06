@@ -170,4 +170,87 @@ describe("import boundaries", () => {
     expect(calls.length).toBeGreaterThan(0);
     for (const call of calls) expect(call).not.toMatch(/briefing\w*\s*[:,]/i);
   });
+
+  it("every model-calling service reserves from the AI budget BEFORE it reads prompt inputs or reaches a provider", () => {
+    const cases: { file: string; reserve: string; before: string[] }[] = [
+      {
+        file: "ai-planning.ts",
+        reserve: 'reserveAiCall(supabase, "plan")',
+        before: [
+          "loadPlanningInputs(supabase, user.id, day)",
+          "createAnthropicGenerator()",
+          "generateParsedProposal(",
+        ],
+      },
+      {
+        file: "briefing-plan.ts",
+        reserve: 'reserveAiCall(supabase, "briefing_plan")',
+        before: [
+          "loadPlanningInputs(supabase, user.id, day)",
+          "createAnthropicBriefingGenerator()",
+          "generateParsedBriefingProposal(",
+        ],
+      },
+      {
+        file: "eod-report.ts",
+        reserve: 'reserveAiCall(supabase, "eod_review")',
+        before: [
+          "listTaskHistoryForTasks(",
+          "computeEodFacts(",
+          "createAnthropicEodInterpreter()",
+          "generateEodInterpretation(",
+        ],
+      },
+    ];
+    for (const { file, reserve, before } of cases) {
+      const source = fs
+        .readFileSync(path.join(SRC, "server", "services", file), "utf8")
+        .replace(/\/\*[\s\S]*?\*\//g, "")
+        .replace(/^\s*\/\/.*$/gm, "");
+      const at = source.indexOf(reserve);
+      expect(at, `${file}: missing ${reserve}`).toBeGreaterThan(-1);
+      expect(source.split(reserve), `${file}: reserved more than once`).toHaveLength(2);
+      for (const later of before) {
+        // `computeEodFacts(`/`loadPlanningInputs(` also appear in an import or a declaration: look at the USE.
+        const use = source.lastIndexOf(later);
+        expect(use, `${file}: ${later} should come after the reservation`).toBeGreaterThan(at);
+      }
+    }
+  });
+
+  it("the stored-proposal paths (resume, confirm, discard) never touch the AI budget", () => {
+    for (const file of ["ai-confirmation.ts"]) {
+      const source = fs.readFileSync(path.join(SRC, "server", "services", file), "utf8");
+      expect(source).not.toMatch(/reserveAiCall|ai-usage|reserve_ai_call/);
+    }
+    const planning = fs
+      .readFileSync(path.join(SRC, "server", "services", "ai-planning.ts"), "utf8")
+      .replace(/\/\*[\s\S]*?\*\//g, "");
+    const loadPending = planning.slice(
+      planning.indexOf("export async function loadPendingAiProposal"),
+    );
+    expect(loadPending).not.toContain("reserveAiCall");
+  });
+
+  it("no browser-side module can reach or name the usage accounting", () => {
+    for (const f of files.filter(
+      (f) => /^(components|features|app|lib)/.test(rel(f)) && nonTest(f),
+    )) {
+      const text = fs.readFileSync(f, "utf8");
+      expect(
+        imports(f).filter((i) => i.includes("repositories/ai-usage")),
+        rel(f),
+      ).toEqual([]);
+      expect(text, rel(f)).not.toMatch(/reserve_ai_call|ai_usage_(events|limits)|reserveAiCall/);
+    }
+  });
+
+  it("the usage repository holds no limit values: the browser-facing code cannot widen its own budget", () => {
+    const source = fs
+      .readFileSync(path.join(SRC, "server", "db", "repositories", "ai-usage.ts"), "utf8")
+      .replace(/\/\*[\s\S]*?\*\//g, "")
+      .replace(/^\s*\/\/.*$/gm, "");
+    expect(source).not.toMatch(/hourly|daily|limit\s*[:=]\s*\d/i);
+    expect(source).toContain("{ p_feature: feature }");
+  });
 });

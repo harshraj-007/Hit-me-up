@@ -38,6 +38,7 @@ vi.mock("@/server/db/repositories/ai-proposals", () => ({
   createAiProposal: vi.fn(),
   findPendingProposal: vi.fn(),
 }));
+vi.mock("@/server/db/repositories/ai-usage", () => ({ reserveAiCall: vi.fn() }));
 
 import Anthropic from "@anthropic-ai/sdk";
 import { requireUserForAction } from "@/server/auth/session";

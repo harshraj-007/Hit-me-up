@@ -94,7 +94,8 @@ begin
     ('create_ai_proposal',         format($f$select public.create_ai_proposal(%L,1,'typed','t','u','[]','[]','[]','[]','valid')$f$, z)),
     ('discard_ai_proposal',        format($f$select public.discard_ai_proposal(%L)$f$, z)),
     ('register_push_subscription', $f$select public.register_push_subscription('https://x.test/e','p','a')$f$),
-    ('revoke_push_subscription',   $f$select public.revoke_push_subscription('https://x.test/e')$f$)
+    ('revoke_push_subscription',   $f$select public.revoke_push_subscription('https://x.test/e')$f$),
+    ('reserve_ai_call',            $f$select public.reserve_ai_call('plan')$f$)
   ) as t(name, stmt) loop
     begin
       execute r.stmt;
@@ -103,8 +104,8 @@ begin
       refused := refused + 1;
     end;
   end loop;
-  if refused <> 11 then raise exception 'expected 11 refusals, saw %', refused; end if;
-  raise notice 'CASE 3: all 11 user-session RPCs independently refuse a service_role JWT (42501) — OK';
+  if refused <> 12 then raise exception 'expected 12 refusals, saw %', refused; end if;
+  raise notice 'CASE 3: all 12 user-session RPCs independently refuse a service_role JWT (42501) — OK';
 end $$;
 
 do $$ begin raise notice 'SERVICE ROLE BOUNDARY OK'; end $$;

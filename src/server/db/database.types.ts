@@ -438,6 +438,14 @@ export interface Database {
         /** The new row — or, on an exact replay of the same day-state, the existing one. */
         Returns: Database["public"]["Tables"]["eod_reports"]["Row"];
       };
+      reserve_ai_call: {
+        Args: {
+          /** `plan` | `briefing_plan` | `eod_review`. */
+          p_feature: string;
+        };
+        /** `{ allowed: true }`, or `{ allowed: false, window, retry_after_seconds }`. */
+        Returns: unknown;
+      };
       confirm_ai_proposal_by_id: {
         Args: {
           p_proposal_id: string;

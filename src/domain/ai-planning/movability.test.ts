@@ -61,7 +61,8 @@ describe("the deterministic planner's rule is untouched", () => {
     // Phase 7's eod_reports table + create_eod_report() — all new objects — plus the two reconcile
     // fixes real end-to-end verification found (no re-send after a terminal state; lapse after start)
     // — plus Phase 8's briefing-plan migration (new tasks through the AI confirmation pipeline),
-    // which touches no apply_replan code.
-    expect(fs.readdirSync(dir)).toHaveLength(17);
+    // which touches no apply_replan code — plus the AI usage-limit migration (a new table and one
+    // new RPC; nothing existing is touched).
+    expect(fs.readdirSync(dir)).toHaveLength(18);
   });
 });

@@ -7,6 +7,7 @@ import type { BriefingPlanGenerator } from "@/server/ai/briefing-port";
 import { generateParsedBriefingProposal } from "@/server/ai/generate-briefing";
 import { requireUserForAction } from "@/server/auth/session";
 import { createAiProposal } from "@/server/db/repositories/ai-proposals";
+import { reserveAiCall } from "@/server/db/repositories/ai-usage";
 import { getLatestBriefingForDay } from "@/server/db/repositories/briefings";
 import { createSupabaseServerClient } from "@/server/db/supabase-server";
 import { ValidationError } from "@/server/errors";
@@ -83,6 +84,11 @@ export async function generateBriefingPlan(
       { path: "briefing", message: "Save your briefing first, then plan your day from it." },
     ]);
   }
+
+  // The shared per-user AI budget (see generateAiProposal): reserved only now that the request, the
+  // day and the saved briefing are all known to be valid, and before any prompt input is read or
+  // built. Over budget → RateLimitError; the provider is never reached. Not refunded on failure.
+  await reserveAiCall(supabase, "briefing_plan");
 
   const { baseRevision, bounds, tasks } = await loadPlanningInputs(supabase, user.id, day);
   const { context, state } = buildBriefingPlanningContext({

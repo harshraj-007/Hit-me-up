@@ -3,6 +3,7 @@ export type ErrorCode =
   | "UNAUTHENTICATED"
   | "NOT_FOUND"
   | "EXTERNAL_SERVICE_ERROR"
+  | "RATE_LIMITED"
   | "INTERNAL_ERROR";
 
 export interface FieldIssue {
@@ -66,6 +67,39 @@ export class ExternalServiceError extends AppError {
   constructor(service: string, init: AppErrorInit = {}) {
     super(init.message ?? "A required upstream service failed.", { cause: init.cause });
     this.service = service;
+  }
+}
+
+/** A short, human wait ("a minute", "about 12 minutes", "about 3 hours") — rounded UP so the user is
+ *  never told to come back before they can. Deliberately says nothing about the limit itself. */
+export function describeWait(seconds: number): string {
+  const s = Number.isFinite(seconds) && seconds > 0 ? seconds : 60;
+  if (s <= 60) return "a minute";
+  if (s < 3600) return `about ${Math.ceil(s / 60)} minutes`;
+  const hours = Math.ceil(s / 3600);
+  return hours === 1 ? "about an hour" : `about ${hours} hours`;
+}
+
+/**
+ * The caller has used their share of the AI budget for now (Phase 9, `reserve_ai_call`). Distinct
+ * from the provider's own 429 (`AiError` reason `rate_limited` — "the AI service is busy"): this one
+ * is about THIS user and says so. The message is fixed, client-safe text; it carries a rounded wait
+ * and nothing about the thresholds, the counts, which window tripped, or the database.
+ */
+export class RateLimitError extends AppError {
+  readonly code = "RATE_LIMITED";
+  readonly status = 429;
+  readonly retryAfterSeconds: number;
+
+  constructor(retryAfterSeconds: number, init: AppErrorInit = {}) {
+    super(
+      init.message ??
+        `You've used your AI allowance for now. Try again in ${describeWait(retryAfterSeconds)}.`,
+      {
+        cause: init.cause,
+      },
+    );
+    this.retryAfterSeconds = retryAfterSeconds;
   }
 }
 

@@ -42,6 +42,7 @@ vi.mock("@/server/db/repositories/ai-proposals", () => ({
   createAiProposal: vi.fn(),
   findPendingProposal: vi.fn(),
 }));
+vi.mock("@/server/db/repositories/ai-usage", () => ({ reserveAiCall: vi.fn() }));
 
 import { requireUserForAction } from "@/server/auth/session";
 import * as taskRepo from "@/server/db/repositories/tasks";

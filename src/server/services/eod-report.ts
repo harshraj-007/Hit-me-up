@@ -13,6 +13,7 @@ import type { EodInterpreter } from "@/server/ai/eod-port";
 import { EOD_PROMPT_VERSION } from "@/server/ai/eod-prompt";
 import { generateEodInterpretation } from "@/server/ai/generate-eod";
 import { requireUserForAction } from "@/server/auth/session";
+import { reserveAiCall } from "@/server/db/repositories/ai-usage";
 import {
   createEodReport,
   findEodReportForState,
@@ -97,6 +98,12 @@ export async function generateEodReport(deps: EodReportDeps = {}): Promise<Gener
   if (existing) {
     return { kind: "report", view: { report: existing, isStale: false }, reused: true };
   }
+
+  // The shared per-user AI budget. Reserved only now: an empty day and an already-written report
+  // for this exact day-state (both returned above) make no model call and so cost nothing. Reserved
+  // before the facts are computed or any prompt is built; over budget → RateLimitError and the
+  // provider is never reached. Not refunded if the model then fails.
+  await reserveAiCall(supabase, "eod_review");
 
   const [history, revisions] = await Promise.all([
     listTaskHistoryForTasks(

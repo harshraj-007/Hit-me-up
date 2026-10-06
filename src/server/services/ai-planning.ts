@@ -16,6 +16,7 @@ import {
   findPendingProposal,
   type AiProposal,
 } from "@/server/db/repositories/ai-proposals";
+import { reserveAiCall } from "@/server/db/repositories/ai-usage";
 import { getLatestRevisionNumber } from "@/server/db/repositories/plans";
 import { listSpilloverTasks, listTasksForDay } from "@/server/db/repositories/tasks";
 import { createSupabaseServerClient, type SupabaseServerClient } from "@/server/db/supabase-server";
@@ -85,6 +86,12 @@ export async function generateAiProposal(
       { path: "planningDate", message: "There's nothing planned on that day yet." },
     ]);
   }
+
+  // The shared per-user AI budget: reserved HERE — after the request is known to be valid and the
+  // day exists (a bad request costs nothing), and before anything is read for, or built into, a
+  // prompt. Over budget → RateLimitError and the provider is never reached. Not refunded on a
+  // later failure.
+  await reserveAiCall(supabase, "plan");
 
   const { baseRevision, bounds, tasks } = await loadPlanningInputs(supabase, user.id, day);
 
